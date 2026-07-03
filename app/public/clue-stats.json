@@ -1,0 +1,63 @@
+{
+  "generatedAt": "2026-07-03T23:05:50.136Z",
+  "source": {
+    "file": "combined_season1-41.tsv",
+    "totalRows": 529939,
+    "parsedRows": 529939,
+    "skippedMalformed": 0,
+    "round1Rows": 261659,
+    "round2Rows": 259234,
+    "fjRows": 9046,
+    "otherRoundRows": 0,
+    "anomalousValueRows": 0,
+    "missingAirdateRows": 0,
+    "distinctAirDates": 9120,
+    "completeGames": 9064,
+    "excludedIncompleteGames": 56,
+    "completenessThreshold": 20,
+    "ddCountAllRows": {
+      "J": 8475,
+      "DJ": 17237
+    },
+    "ddCountUsedInStats": {
+      "J": 8446,
+      "DJ": 17169
+    }
+  },
+  "ddRowWeights": {
+    "J": [
+      0.0003551977267345489,
+      0.07009235140895098,
+      0.2418896519062278,
+      0.3607624911200568,
+      0.3269003078380298
+    ],
+    "DJ": [
+      0.0014561127613722407,
+      0.09790902207466946,
+      0.2785252489952822,
+      0.3822587221154406,
+      0.23985089405323548
+    ]
+  },
+  "ddWagerVsRoundMax": {
+    "J": {
+      "p10": 0.8,
+      "p25": 1,
+      "p50": 1.2,
+      "p75": 2,
+      "p90": 2.8,
+      "mean": 1.5323402794222152,
+      "n": 8446
+    },
+    "DJ": {
+      "p10": 0.5,
+      "p25": 1,
+      "p50": 1.25,
+      "p75": 2,
+      "p90": 2.5,
+      "mean": 1.5033147242122313,
+      "n": 17169
+    }
+  }
+}
