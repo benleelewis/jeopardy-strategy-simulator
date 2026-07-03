@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jeopardy Win % Simulator</title>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #ffffff;
+            padding: 40px 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            font-size: 32px;
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #1f2937;
+        }
+        
+        .subtitle {
+            font-size: 16px;
+            color: #6b7280;
+            margin-bottom: 32px;
+        }
+        
+        .main-content {
+            display: flex;
+            gap: 40px;
+            align-items: flex-start;
+        }
+        
+        .chart-container {
+            position: relative;
+        }
+        
+        .loading {
+            width: 600px;
+            height: 500px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f3f4f6;
+            border-radius: 8px;
+        }
+        
+        .loading-content {
+            text-align: center;
+        }
+        
+        .loading-text {
+            font-size: 18px;
+            color: #6b7280;
+            margin-bottom: 16px;
+        }
+        
+        .loading-bar {
+            width: 200px;
+            height: 4px;
+            background: #e5e7eb;
+            border-radius: 2px;
+            overflow: hidden;
+            margin: 0 auto;
+        }
+        
+        .loading-bar-inner {
+            width: 60%;
+            height: 100%;
+            background: #3b82f6;
+            animation: slide 1.5s infinite;
+        }
+        
+        @keyframes slide {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(300%); }
+        }
+        
+        .stats-panel {
+            min-width: 320px;
+            padding: 24px;
+            background: white;
+            border: 2px solid #e5e7eb;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+        }
+        
+        .stats-section {
+            margin-bottom: 20px;
+        }
+        
+        .stats-section h2 {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 16px;
+            color: #1f2937;
+        }
+        
+        .stats-section h3 {
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 12px;
+            color: #1f2937;
+        }
+        
+        .stat-row {
+            margin-bottom: 8px;
+        }
+        
+        .stat-label {
+            color: #6b7280;
+        }
+        
+        .stat-value {
+            font-weight: bold;
+            font-size: 18px;
+        }
+        
+        .win-pct {
+            font-size: 36px;
+            font-weight: bold;
+            color: #059669;
+            margin-bottom: 4px;
+        }
+        
+        .win-pct-label {
+            color: #6b7280;
+            font-size: 14px;
+        }
+        
+        .bottleneck {
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            font-weight: bold;
+        }
+        
+        .bottleneck-buzzer {
+            background: #fef3c7;
+        }
+        
+        .bottleneck-knowledge {
+            background: #dbeafe;
+        }
+        
+        .marginal-returns {
+            font-size: 14px;
+            color: #4b5563;
+        }
+        
+        .marginal-row {
+            margin-bottom: 6px;
+        }
+        
+        .marginal-value {
+            font-weight: bold;
+            color: #059669;
+        }
+        
+        .divider {
+            border-top: 1px solid #e5e7eb;
+            padding-top: 20px;
+        }
+        
+        .info-box {
+            margin-top: 40px;
+            padding: 20px;
+            background: #f9fafb;
+            border-radius: 8px;
+            font-size: 14px;
+            color: #6b7280;
+        }
+        
+        svg {
+            background: white;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Jeopardy Win % by Knowledge & Buzzer Skill</h1>
+        <p class="subtitle">Drag the green marker to explore how knowledge and buzzer timing affect your win rate</p>
+        
+        <div class="main-content">
+            <div class="chart-container">
+                <div id="loading" class="loading">
+                    <div class="loading-content">
+                        <div class="loading-text">
+                            Computing heat map...<br>
+                            <small>(This takes ~5-10 seconds)</small>
+                        </div>
+                        <div class="loading-bar">
+                            <div class="loading-bar-inner"></div>
+                        </div>
+                    </div>
+                </div>
+                <svg id="chart" width="600" height="500" style="display: none;"></svg>
+            </div>
+            
+            <div class="stats-panel">
+                <div class="stats-section">
+                    <h2>Your Position</h2>
+                    <div class="stat-row">
+                        <span class="stat-label">Knowledge: </span>
+                        <span class="stat-value" id="knowledge-val">65%</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Buzzer Skill: </span>
+                        <span class="stat-value" id="buzzer-val">55%</span>
+                    </div>
+                </div>
+                
+                <div class="stats-section divider">
+                    <h3>Performance</h3>
+                    <div id="performance">
+                        <div style="color: #6b7280; font-style: italic;">Computing...</div>
+                    </div>
+                </div>
+                
+                <div id="bottleneck-section" class="stats-section divider" style="display: none;">
+                    <h3>Bottleneck Analysis</h3>
+                    <div id="bottleneck-content"></div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="info-box">
+            <strong>How it works:</strong> Each position simulates 500 games against random opponents. 
+            The heat map shows win percentage across all knowledge/buzzer combinations. 
+            White dots show typical opponent archetypes (Average, Genius/Slow, Fast/Shallow, Champion).
+            Red = low win %, Yellow = medium, Green = high win %.
+        </div>
+    </div>
+    
+    <script>
+        // ============================================================================
+        // SIMULATION ENGINE
+        // ============================================================================
+        
+        function simulateSingleGame(yourKnowledge, yourBuzzer, opponentKnowledge, opponentBuzzer) {
+            const scores = [0, 0, 0];
+            const players = [
+                { knowledge: yourKnowledge, buzzer: yourBuzzer },
+                { knowledge: opponentKnowledge[0], buzzer: opponentBuzzer[0] },
+                { knowledge: opponentKnowledge[1], buzzer: opponentBuzzer[1] }
+            ];
+            
+            // Jeopardy Round (30 clues)
+            const jClues = Array(6).fill(null).flatMap(() => [200, 400, 600, 800, 1000]);
+            jClues.forEach(value => {
+                const knows = players.map(p => Math.random() < p.knowledge);
+                const anyKnows = knows.some(k => k);
+                
+                if (anyKnows) {
+                    const buzzerWeights = knows.map((k, i) => k ? players[i].buzzer : 0);
+                    const totalWeight = buzzerWeights.reduce((a, b) => a + b, 0);
+                    
+                    let rand = Math.random() * totalWeight;
+                    let winner = 0;
+                    for (let i = 0; i < buzzerWeights.length; i++) {
+                        rand -= buzzerWeights[i];
+                        if (rand <= 0) {
+                            winner = i;
+                            break;
+                        }
+                    }
+                    scores[winner] += value;
+                }
+            });
+            
+            // Double Jeopardy Round
+            const djClues = Array(6).fill(null).flatMap(() => [400, 800, 1200, 1600, 2000]);
+            djClues.forEach(value => {
+                const knows = players.map(p => Math.random() < p.knowledge);
+                const anyKnows = knows.some(k => k);
+                
+                if (anyKnows) {
+                    const buzzerWeights = knows.map((k, i) => k ? players[i].buzzer : 0);
+                    const totalWeight = buzzerWeights.reduce((a, b) => a + b, 0);
+                    
+                    let rand = Math.random() * totalWeight;
+                    let winner = 0;
+                    for (let i = 0; i < buzzerWeights.length; i++) {
+                        rand -= buzzerWeights[i];
+                        if (rand <= 0) {
+                            winner = i;
+                            break;
+                        }
+                    }
+                    scores[winner] += value;
+                }
+            });
+            
+            return scores[0] > Math.max(scores[1], scores[2]);
+        }
+        
+        function sampleOpponents(opponentModel) {
+            const opponents = [];
+            for (let i = 0; i < 2; i++) {
+                const archetype = opponentModel[Math.floor(Math.random() * opponentModel.length)];
+                opponents.push({
+                    knowledge: Math.max(0, Math.min(1, archetype.knowledge + (Math.random() - 0.5) * 0.1)),
+                    buzzer: Math.max(0, Math.min(1, archetype.buzzer + (Math.random() - 0.5) * 0.1))
+                });
+            }
+            return opponents;
+        }
+        
+        function calculateWinPercentage(yourKnowledge, yourBuzzer, opponentModel, nSims = 2000) {
+            let wins = 0;
+            
+            for (let i = 0; i < nSims; i++) {
+                const opponents = sampleOpponents(opponentModel);
+                const won = simulateSingleGame(
+                    yourKnowledge, 
+                    yourBuzzer,
+                    opponents.map(o => o.knowledge),
+                    opponents.map(o => o.buzzer)
+                );
+                if (won) wins++;
+            }
+            
+            return wins / nSims;
+        }
+        
+        function precomputeGrid(opponentModel, resolution = 12) {
+            const grid = [];
+            for (let k = 0; k <= 1; k += 1/resolution) {
+                for (let b = 0; b <= 1; b += 1/resolution) {
+                    const winPct = calculateWinPercentage(k, b, opponentModel, 100);
+                    grid.push({ knowledge: k, buzzer: b, winPct });
+                }
+            }
+            return grid;
+        }
+        
+        // ============================================================================
+        // VISUALIZATION
+        // ============================================================================
+        
+        const opponentModel = [
+            { name: 'Average', knowledge: 0.60, buzzer: 0.50, weight: 0.60 },
+            { name: 'Genius/Slow', knowledge: 0.80, buzzer: 0.35, weight: 0.15 },
+            { name: 'Fast/Shallow', knowledge: 0.45, buzzer: 0.70, weight: 0.15 },
+            { name: 'Champion', knowledge: 0.80, buzzer: 0.75, weight: 0.10 },
+        ];
+        
+        const expandedModel = opponentModel.flatMap(arch => 
+            Array(Math.round(arch.weight * 100)).fill({ knowledge: arch.knowledge, buzzer: arch.buzzer })
+        );
+        
+        let yourPosition = { knowledge: 0.65, buzzer: 0.55 };
+        let heatMapData = null;
+        
+        const width = 600;
+        const height = 500;
+        const margin = { top: 40, right: 40, bottom: 60, left: 70 };
+        const innerWidth = width - margin.left - margin.right;
+        const innerHeight = height - margin.top - margin.bottom;
+        
+        // Scales
+        const xScale = d3.scaleLinear().domain([0, 1]).range([0, innerWidth]);
+        const yScale = d3.scaleLinear().domain([0, 1]).range([innerHeight, 0]);
+        const colorScale = d3.scaleSequential(d3.interpolateRdYlGn).domain([0, 1]);
+        
+        function drawChart() {
+            if (!heatMapData) return;
+            
+            const svg = d3.select('#chart');
+            svg.selectAll('*').remove();
+            
+            const g = svg.append('g')
+                .attr('transform', `translate(${margin.left},${margin.top})`);
+            
+            // Draw heat map
+            const delaunay = d3.Delaunay.from(
+                heatMapData,
+                d => xScale(d.buzzer),
+                d => yScale(d.knowledge)
+            );
+            
+            const voronoi = delaunay.voronoi([0, 0, innerWidth, innerHeight]);
+            
+            heatMapData.forEach((d, i) => {
+                const cell = voronoi.cellPolygon(i);
+                if (cell) {
+                    g.append('path')
+                        .attr('d', `M${cell.join('L')}Z`)
+                        .attr('fill', colorScale(d.winPct))
+                        .attr('opacity', 0.6)
+                        .attr('stroke', 'none');
+                }
+            });
+            
+            // Draw opponent markers
+            opponentModel.forEach(arch => {
+                g.append('circle')
+                    .attr('cx', xScale(arch.buzzer))
+                    .attr('cy', yScale(arch.knowledge))
+                    .attr('r', 6)
+                    .attr('fill', 'white')
+                    .attr('stroke', '#333')
+                    .attr('stroke-width', 2)
+                    .attr('opacity', 0.8);
+                
+                g.append('text')
+                    .attr('x', xScale(arch.buzzer))
+                    .attr('y', yScale(arch.knowledge) - 12)
+                    .attr('text-anchor', 'middle')
+                    .attr('font-size', '10px')
+                    .attr('font-weight', 'bold')
+                    .attr('fill', '#333')
+                    .text(arch.name.split('/')[0]);
+            });
+            
+            // Axes
+            g.append('g')
+                .attr('transform', `translate(0,${innerHeight})`)
+                .call(d3.axisBottom(xScale).tickFormat(d => `${d * 100}%`))
+                .append('text')
+                .attr('x', innerWidth / 2)
+                .attr('y', 40)
+                .attr('fill', 'black')
+                .attr('font-size', '14px')
+                .attr('text-anchor', 'middle')
+                .text('Buzzer Skill →');
+            
+            g.append('g')
+                .call(d3.axisLeft(yScale).tickFormat(d => `${d * 100}%`))
+                .append('text')
+                .attr('transform', 'rotate(-90)')
+                .attr('x', -innerHeight / 2)
+                .attr('y', -50)
+                .attr('fill', 'black')
+                .attr('font-size', '14px')
+                .attr('text-anchor', 'middle')
+                .text('← Knowledge %');
+            
+            // Your position marker (draggable)
+            const drag = d3.drag()
+                .on('drag', function(event) {
+                    const newBuzzer = Math.max(0, Math.min(1, xScale.invert(event.x)));
+                    const newKnowledge = Math.max(0, Math.min(1, yScale.invert(event.y)));
+                    yourPosition = { knowledge: newKnowledge, buzzer: newBuzzer };
+                    updatePosition();
+                });
+            
+            const yourMarker = g.append('g')
+                .attr('class', 'your-marker')
+                .attr('transform', `translate(${xScale(yourPosition.buzzer)},${yScale(yourPosition.knowledge)})`)
+                .style('cursor', 'move')
+                .call(drag);
+            
+            yourMarker.append('circle')
+                .attr('r', 12)
+                .attr('fill', '#4ade80')
+                .attr('stroke', '#15803d')
+                .attr('stroke-width', 3);
+            
+            yourMarker.append('text')
+                .attr('y', -18)
+                .attr('text-anchor', 'middle')
+                .attr('font-size', '12px')
+                .attr('font-weight', 'bold')
+                .attr('fill', '#15803d')
+                .text('YOU');
+        }
+        
+        function updatePosition() {
+            // Update marker position
+            d3.select('.your-marker')
+                .attr('transform', `translate(${xScale(yourPosition.buzzer)},${yScale(yourPosition.knowledge)})`);
+            
+            // Update stats
+            document.getElementById('knowledge-val').textContent = Math.round(yourPosition.knowledge * 100) + '%';
+            document.getElementById('buzzer-val').textContent = Math.round(yourPosition.buzzer * 100) + '%';
+            
+            // Calculate win percentage
+            setTimeout(() => {
+                const winPct = calculateWinPercentage(yourPosition.knowledge, yourPosition.buzzer, expandedModel, 500);
+                
+                document.getElementById('performance').innerHTML = `
+                    <div class="win-pct">${Math.round(winPct * 100)}%</div>
+                    <div class="win-pct-label">Win rate vs the field</div>
+                `;
+                
+                // Calculate marginals
+                const marginalKnowledge = calculateWinPercentage(
+                    Math.min(1, yourPosition.knowledge + 0.1), 
+                    yourPosition.buzzer, 
+                    expandedModel, 
+                    200
+                ) - winPct;
+                
+                const marginalBuzzer = calculateWinPercentage(
+                    yourPosition.knowledge, 
+                    Math.min(1, yourPosition.buzzer + 0.1), 
+                    expandedModel, 
+                    200
+                ) - winPct;
+                
+                const bottleneck = marginalBuzzer > marginalKnowledge ? 'BUZZER' : 'KNOWLEDGE';
+                
+                document.getElementById('bottleneck-section').style.display = 'block';
+                document.getElementById('bottleneck-content').innerHTML = `
+                    <div class="bottleneck bottleneck-${bottleneck.toLowerCase()}">
+                        ⚠️ ${bottleneck} is limiting you
+                    </div>
+                    <div class="marginal-returns">
+                        <div class="marginal-row">
+                            +10% buzzer → <span class="marginal-value">+${Math.round(marginalBuzzer * 100)}%</span> win rate
+                        </div>
+                        <div class="marginal-row">
+                            +10% knowledge → <span class="marginal-value">+${Math.round(marginalKnowledge * 100)}%</span> win rate
+                        </div>
+                    </div>
+                `;
+            }, 10);
+        }
+        
+        // Initialize
+        console.log('Computing heat map...');
+        setTimeout(() => {
+            heatMapData = precomputeGrid(expandedModel, 12);
+            console.log('Heat map computed:', heatMapData.length, 'points');
+            
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('chart').style.display = 'block';
+            
+            drawChart();
+            updatePosition();
+        }, 100);
+    </script>
+</body>
+</html>

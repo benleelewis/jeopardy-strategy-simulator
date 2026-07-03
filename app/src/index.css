@@ -1,0 +1,74 @@
+:root {
+  /* Clean theme (default) */
+  --bg: #fafafa;
+  --bg-panel: #ffffff;
+  --text: #374151;
+  --text-h: #111827;
+  --text-muted: #6b7280;
+  --border: #e5e7eb;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+
+  /* Heat map gradient */
+  --heat-cold: #dc2626;
+  --heat-warm: #eab308;
+  --heat-hot: #16a34a;
+
+  /* Contribution graph: Jeopardy blue→gold */
+  --cg-1: #060a30;
+  --cg-2: #0a1566;
+  --cg-3: #1a3ba8;
+  --cg-4: #c5a028;
+  --cg-5: #f5d442;
+  --cg-empty: #0a0e3d;
+
+  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, Consolas, monospace;
+
+  font: 15px/1.5 var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Jeopardy theme */
+.jeopardy {
+  --bg: #060ce9;
+  --bg-panel: #0a10b8;
+  --text: #d4af37;
+  --text-h: #ffffff;
+  --text-muted: #a08520;
+  --border: #1a20ff;
+  --accent: #d4af37;
+  --accent-hover: #f5d442;
+
+  /* Contribution graph: lighter blues on blue bg */
+  --cg-1: #1a1a4a;
+  --cg-2: #2a2a8a;
+  --cg-3: #4a4acc;
+  --cg-4: #c5a028;
+  --cg-5: #f5d442;
+  --cg-empty: #12127a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.jeopardy) {
+    --bg: #111827;
+    --bg-panel: #1f2937;
+    --text: #d1d5db;
+    --text-h: #f9fafb;
+    --text-muted: #9ca3af;
+    --border: #374151;
+
+    /* Contribution graph: adjusted for dark bg */
+    --cg-1: #0a1030;
+    --cg-2: #0a1566;
+    --cg-3: #1a3ba8;
+    --cg-4: #c5a028;
+    --cg-5: #f5d442;
+    --cg-empty: #161b22;
+  }
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { margin: 0; }

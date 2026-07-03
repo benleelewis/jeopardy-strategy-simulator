@@ -1,0 +1,594 @@
+import { useRef, useEffect, useState, useCallback } from 'react';
+import * as d3 from 'd3';
+import type { SimConfig } from '../sim/sim-engine';
+import type { GridCell } from '../sim/sim-worker';
+import { FAMOUS_PLAYERS } from '../sim/opponent-models';
+import { DIMENSIONS, type DimensionName } from '../sim/dimensions';
+import { gaussianBlur2D } from '../sim/math-utils';
+
+interface Props {
+  position: { x: number; y: number };
+  onPositionChange: (pos: { x: number; y: number }) => void;
+  xAxis: DimensionName;
+  yAxis: DimensionName;
+  onAxisChange: (axis: 'x' | 'y', dim: DimensionName) => void;
+  pinnedValues: Record<string, number>;
+  config: SimConfig;
+  onWinRateUpdate: (rate: number | null) => void;
+}
+
+const WIDTH = 560;
+const HEIGHT = 560;
+const MARGIN = { top: 40, right: 20, bottom: 60, left: 70 };
+const INNER_W = WIDTH - MARGIN.left - MARGIN.right;
+const INNER_H = HEIGHT - MARGIN.top - MARGIN.bottom;
+
+const CONTOUR_LEVELS = [0.33, 0.50, 0.67];
+
+const xScale = d3.scaleLinear().domain([0, 1]).range([0, INNER_W]);
+const yScale = d3.scaleLinear().domain([0, 1]).range([INNER_H, 0]);
+const colorScale = d3.scaleSequential(d3.interpolateRdYlGn).domain([0, 1]);
+
+const ALL_DIMENSIONS = Object.keys(DIMENSIONS) as DimensionName[];
+
+export function HeatMap({
+  position, onPositionChange,
+  xAxis, yAxis, onAxisChange,
+  pinnedValues, config, onWinRateUpdate,
+}: Props) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const [grid, setGrid] = useState<GridCell[]>([]);
+  const [resolution, setResolution] = useState(20);
+  const [computing, setComputing] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [stale, setStale] = useState(false); // true when axes changed but grid hasn't arrived yet
+
+  // Axis selector popover state
+  const [popover, setPopover] = useState<{ axis: 'x' | 'y'; anchorX: number; anchorY: number } | null>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const posRef = useRef(position);
+  posRef.current = position;
+  const onPositionChangeRef = useRef(onPositionChange);
+  onPositionChangeRef.current = onPositionChange;
+  const rafRef = useRef<number | null>(null);
+
+  // Track axes for stale detection
+  const prevAxesRef = useRef({ xAxis, yAxis });
+
+  // Worker setup
+  useEffect(() => {
+    const worker = new Worker(
+      new URL('../sim/sim-worker.ts', import.meta.url),
+      { type: 'module' },
+    );
+
+    worker.onmessage = (e) => {
+      const msg = e.data;
+      if (msg.type === 'progress') {
+        setProgress(msg.pct);
+      } else if (msg.type === 'gridResult') {
+        setGrid(msg.grid);
+        setComputing(false);
+        setStale(false);
+        setProgress(1);
+      } else if (msg.type === 'winRateResult') {
+        onWinRateUpdate(msg.winRate);
+      } else if (msg.type === 'error') {
+        setComputing(false);
+        console.warn('Worker error:', msg.message);
+      }
+    };
+
+    worker.onerror = () => {
+      setComputing(false);
+      console.warn('Worker crashed — falling back to main thread');
+    };
+
+    workerRef.current = worker;
+    return () => worker.terminate();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Compute grid when config/axes/pinned change
+  useEffect(() => {
+    if (!workerRef.current) return;
+
+    // Detect axis change for stale fade
+    if (prevAxesRef.current.xAxis !== xAxis || prevAxesRef.current.yAxis !== yAxis) {
+      setStale(true);
+      prevAxesRef.current = { xAxis, yAxis };
+    }
+
+    setComputing(true);
+    setProgress(0);
+
+    workerRef.current.postMessage({ type: 'cancel' });
+    workerRef.current.postMessage({
+      type: 'computeGrid',
+      resolution: 20,
+      xAxis,
+      yAxis,
+      pinnedValues,
+      config,
+      gamesPerCell: 150,
+    });
+    setResolution(20);
+  }, [xAxis, yAxis, pinnedValues, config]);
+
+  // When fast pass completes, start refined pass
+  useEffect(() => {
+    if (grid.length > 0 && resolution === 20 && !computing && workerRef.current) {
+      setComputing(true);
+      workerRef.current.postMessage({
+        type: 'computeGrid',
+        resolution: 40,
+        xAxis,
+        yAxis,
+        pinnedValues,
+        config,
+        gamesPerCell: 300,
+      });
+      setResolution(40);
+    }
+  }, [grid, resolution, computing]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Debounced win rate computation
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!workerRef.current) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    debounceRef.current = setTimeout(() => {
+      workerRef.current?.postMessage({
+        type: 'computeWinRate',
+        xAxis,
+        yAxis,
+        xVal: position.x,
+        yVal: position.y,
+        pinnedValues,
+        config,
+        nGames: 500,
+      });
+    }, 150);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [position, xAxis, yAxis, pinnedValues, config]);
+
+  // Close popover on outside click
+  useEffect(() => {
+    if (!popover) return;
+    const handler = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setPopover(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [popover]);
+
+  // Close popover on Escape
+  useEffect(() => {
+    if (!popover) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPopover(null);
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [popover]);
+
+  const handleAxisLabelClick = useCallback((axis: 'x' | 'y', event: React.MouseEvent) => {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const svgRect = svgRef.current?.getBoundingClientRect();
+    if (!svgRect) return;
+    setPopover({
+      axis,
+      anchorX: rect.left - svgRect.left + rect.width / 2,
+      anchorY: rect.top - svgRect.top + rect.height,
+    });
+  }, []);
+
+  const handleDimensionSelect = useCallback((dim: DimensionName) => {
+    if (!popover) return;
+    const currentDim = popover.axis === 'x' ? xAxis : yAxis;
+    if (dim !== currentDim) {
+      onAxisChange(popover.axis, dim);
+    }
+    setPopover(null);
+  }, [popover, xAxis, yAxis, onAxisChange]);
+
+  // ── Effect: Render grid + static elements ──
+  useEffect(() => {
+    if (!svgRef.current || grid.length === 0) return;
+
+    const svg = d3.select(svgRef.current);
+    // Only clear the main group, not axis labels (they're React-managed)
+    svg.selectAll('.main-group').remove();
+
+    const g = svg.append('g')
+      .attr('class', 'main-group')
+      .attr('transform', `translate(${MARGIN.left},${MARGIN.top})`)
+      .style('opacity', stale ? 0.3 : 1)
+      .style('transition', 'opacity 0.3s ease');
+
+    const res = Math.round(Math.sqrt(grid.length)) - 1;
+    const cellW = INNER_W / res;
+    const cellH = INNER_H / res;
+
+    // Smooth grid values
+    const rawValues: number[] = new Array((res + 1) * (res + 1)).fill(0);
+    for (const cell of grid) {
+      const xi = Math.round(cell.x * res);
+      const yi = Math.round(cell.y * res);
+      if (xi <= res && yi <= res) {
+        rawValues[yi * (res + 1) + xi] = cell.winRate;
+      }
+    }
+    const smoothedValues = gaussianBlur2D(rawValues, res + 1, res + 1, 2);
+
+    // Draw cells
+    g.selectAll('rect.cell')
+      .data(grid)
+      .join('rect')
+      .attr('class', 'cell')
+      .attr('x', d => xScale(d.x))
+      .attr('y', d => yScale(d.y) - cellH)
+      .attr('width', cellW + 1)
+      .attr('height', cellH + 1)
+      .attr('fill', (_, i) => colorScale(smoothedValues[i] ?? 0))
+      .attr('opacity', 0.85);
+
+    // Contour lines
+    if (grid.length > 100) {
+      const contourRes = res + 1;
+      const raw: number[] = new Array(contourRes * contourRes).fill(0);
+      for (const cell of grid) {
+        const xi = Math.round(cell.x * res);
+        const yi = Math.round(cell.y * res);
+        if (xi < contourRes && yi < contourRes) {
+          raw[yi * contourRes + xi] = cell.winRate;
+        }
+      }
+      const values = gaussianBlur2D(raw, contourRes, contourRes, 2);
+
+      const contours = d3.contours()
+        .size([contourRes, contourRes])
+        .thresholds(CONTOUR_LEVELS)(values);
+
+      g.selectAll('path.contour')
+        .data(contours)
+        .join('path')
+        .attr('class', 'contour')
+        .attr('d', d3.geoPath(d3.geoIdentity().scale(INNER_W / (contourRes - 1)).reflectY(true).translate([0, INNER_H])))
+        .attr('fill', 'none')
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 1.5)
+        .attr('stroke-opacity', 0.7);
+
+      // Contour labels
+      for (const contour of contours) {
+        if (contour.coordinates.length === 0) continue;
+        const firstRing = contour.coordinates[0]?.[0];
+        if (!firstRing || firstRing.length === 0) continue;
+        const mid = firstRing[Math.floor(firstRing.length / 2)];
+        if (mid) {
+          const contourX = d3.scaleLinear().domain([0, contourRes - 1]).range([0, INNER_W]);
+          const contourY = d3.scaleLinear().domain([0, contourRes - 1]).range([INNER_H, 0]);
+          g.append('text')
+            .attr('x', contourX(mid[0]))
+            .attr('y', contourY(mid[1]))
+            .attr('fill', '#fff')
+            .attr('font-size', '11px')
+            .attr('font-weight', '600')
+            .attr('text-anchor', 'middle')
+            .attr('dy', '0.35em')
+            .style('text-shadow', '0 1px 3px rgba(0,0,0,0.7)')
+            .text(`${Math.round(contour.value * 100)}%`);
+        }
+      }
+    }
+
+    // Click-to-teleport overlay (on top of cells/contours, under markers)
+    g.append('rect')
+      .attr('class', 'click-target')
+      .attr('width', INNER_W)
+      .attr('height', INNER_H)
+      .attr('fill', 'transparent')
+      .style('cursor', 'crosshair')
+      .on('click', function (event) {
+        const [mx, my] = d3.pointer(event);
+        const nx = Math.max(0, Math.min(1, xScale.invert(mx)));
+        const ny = Math.max(0, Math.min(1, yScale.invert(my)));
+        onPositionChangeRef.current({ x: nx, y: ny });
+      });
+
+    // Famous player markers
+    for (const player of FAMOUS_PLAYERS) {
+      const xPos = player.positions[xAxis];
+      const yPos = player.positions[yAxis];
+      if (xPos === undefined || yPos === undefined) continue;
+
+      const px = xScale(xPos);
+      const py = yScale(yPos);
+      const isEstimated = player.estimated?.has(xAxis) || player.estimated?.has(yAxis);
+
+      if (isEstimated) {
+        // Dashed uncertainty ring for estimated positions
+        g.append('circle')
+          .attr('cx', px)
+          .attr('cy', py)
+          .attr('r', 12)
+          .attr('fill', 'none')
+          .attr('stroke', 'rgba(255,255,255,0.4)')
+          .attr('stroke-width', 1)
+          .attr('stroke-dasharray', '3,3');
+      }
+
+      g.append('circle')
+        .attr('cx', px)
+        .attr('cy', py)
+        .attr('r', 5)
+        .attr('fill', isEstimated ? 'rgba(255,255,255,0.6)' : '#fff')
+        .attr('stroke', '#333')
+        .attr('stroke-width', 1.5)
+        .attr('opacity', isEstimated ? 0.7 : 0.9);
+
+      g.append('text')
+        .attr('x', px + 8)
+        .attr('y', py + 4)
+        .attr('fill', '#fff')
+        .attr('font-size', '10px')
+        .attr('font-weight', '500')
+        .attr('opacity', isEstimated ? 0.6 : 1)
+        .style('text-shadow', '0 1px 3px rgba(0,0,0,0.8)')
+        .text(player.name.split(' ').pop()!);
+    }
+
+    // YOU marker
+    const youGroup = g.append('g')
+      .attr('class', 'you-marker')
+      .style('cursor', 'grab');
+
+    youGroup.append('circle')
+      .attr('r', 12)
+      .attr('fill', 'rgba(255,255,255,0.3)')
+      .attr('stroke', '#fff')
+      .attr('stroke-width', 2);
+
+    youGroup.append('circle')
+      .attr('r', 5)
+      .attr('fill', '#fff');
+
+    youGroup.append('text')
+      .attr('y', -18)
+      .attr('text-anchor', 'middle')
+      .attr('fill', '#fff')
+      .attr('font-size', '12px')
+      .attr('font-weight', '700')
+      .style('text-shadow', '0 1px 3px rgba(0,0,0,0.8)')
+      .text('YOU');
+
+    // Drag handler (throttled to rAF for smooth 60fps interaction)
+    const drag = d3.drag<SVGGElement, unknown>()
+      .on('start', function () {
+        d3.select(this).style('cursor', 'grabbing');
+      })
+      .on('drag', function (event) {
+        const gNode = (this as SVGGElement).parentNode as SVGGElement;
+        const [mx, my] = d3.pointer(event.sourceEvent, gNode);
+        const xVal = Math.max(0, Math.min(1, xScale.invert(mx)));
+        const yVal = Math.max(0, Math.min(1, yScale.invert(my)));
+        // Update SVG position immediately for visual responsiveness
+        d3.select(this).attr('transform', `translate(${xScale(xVal)},${yScale(yVal)})`);
+        // Throttle React state updates to animation frames
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+        rafRef.current = requestAnimationFrame(() => {
+          onPositionChangeRef.current({ x: xVal, y: yVal });
+          rafRef.current = null;
+        });
+      })
+      .on('end', function (event) {
+        d3.select(this).style('cursor', 'grab');
+        // Flush any pending rAF and send final position
+        if (rafRef.current) {
+          cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+        }
+        const gNode = (this as SVGGElement).parentNode as SVGGElement;
+        const [mx, my] = d3.pointer(event.sourceEvent, gNode);
+        const xVal = Math.max(0, Math.min(1, xScale.invert(mx)));
+        const yVal = Math.max(0, Math.min(1, yScale.invert(my)));
+        onPositionChangeRef.current({ x: xVal, y: yVal });
+      });
+
+    youGroup.call(drag);
+
+    // Axes
+    const xAxisG = d3.axisBottom(xScale)
+      .ticks(5)
+      .tickFormat(d => `${Math.round(+d * 100)}%`);
+
+    const yAxisG = d3.axisLeft(yScale)
+      .ticks(5)
+      .tickFormat(d => `${Math.round(+d * 100)}%`);
+
+    g.append('g')
+      .attr('transform', `translate(0,${INNER_H})`)
+      .call(xAxisG)
+      .selectAll('text')
+      .attr('fill', 'var(--text)');
+
+    g.append('g')
+      .call(yAxisG)
+      .selectAll('text')
+      .attr('fill', 'var(--text)');
+
+    // Axis styling
+    g.selectAll('.domain, .tick line').attr('stroke', 'var(--border)');
+  }, [grid, xAxis, yAxis, stale]);
+
+  // ── Effect: Update marker position ──
+  useEffect(() => {
+    if (!svgRef.current) return;
+    const svg = d3.select(svgRef.current);
+    const marker = svg.select<SVGGElement>('.you-marker');
+    if (!marker.empty()) {
+      marker.attr('transform', `translate(${xScale(position.x)},${yScale(position.y)})`);
+    }
+  }, [position]);
+
+  const xDim = DIMENSIONS[xAxis];
+  const yDim = DIMENSIONS[yAxis];
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      <svg
+        ref={svgRef}
+        width={WIDTH}
+        height={HEIGHT}
+        style={{ touchAction: 'none' }}
+        role="img"
+        aria-label={`Win rate heat map, ${xDim.label} by ${yDim.label}`}
+      >
+        {/* Title */}
+        <text
+          x={WIDTH / 2}
+          y={24}
+          textAnchor="middle"
+          fill="var(--text-h)"
+          fontSize="16px"
+          fontWeight="600"
+        >
+          {`Win Rate by ${xDim.label} × ${yDim.label}`}
+        </text>
+      </svg>
+
+      {/* Clickable X-axis label */}
+      <button
+        onClick={(e) => handleAxisLabelClick('x', e)}
+        style={{
+          position: 'absolute',
+          bottom: 8,
+          left: MARGIN.left + INNER_W / 2,
+          transform: 'translateX(-50%)',
+          background: 'none',
+          border: 'none',
+          color: 'var(--text-h)',
+          fontSize: '14px',
+          fontWeight: 600,
+          cursor: 'pointer',
+          padding: '4px 8px',
+          borderRadius: 4,
+          minHeight: 44,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+        onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+        aria-label={`Change X-axis dimension, currently ${xDim.label}`}
+      >
+        {xDim.label} <span style={{ fontSize: '10px', opacity: 0.6 }}>▼</span>
+      </button>
+
+      {/* Clickable Y-axis label */}
+      <button
+        onClick={(e) => handleAxisLabelClick('y', e)}
+        style={{
+          position: 'absolute',
+          top: MARGIN.top + INNER_H / 2,
+          left: 4,
+          transform: 'translateY(-50%) rotate(-90deg)',
+          transformOrigin: 'center center',
+          background: 'none',
+          border: 'none',
+          color: 'var(--text-h)',
+          fontSize: '14px',
+          fontWeight: 600,
+          cursor: 'pointer',
+          padding: '4px 8px',
+          borderRadius: 4,
+          minHeight: 44,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          whiteSpace: 'nowrap',
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+        onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+        aria-label={`Change Y-axis dimension, currently ${yDim.label}`}
+      >
+        {yDim.label} <span style={{ fontSize: '10px', opacity: 0.6 }}>▼</span>
+      </button>
+
+      {/* Axis dimension popover */}
+      {popover && (
+        <div
+          ref={popoverRef}
+          style={{
+            position: 'absolute',
+            left: popover.anchorX,
+            top: popover.anchorY + 4,
+            transform: 'translateX(-50%)',
+            background: 'rgba(30, 30, 40, 0.95)',
+            border: '1px solid rgba(255,255,255,0.2)',
+            borderRadius: 8,
+            padding: '4px 0',
+            minWidth: 200,
+            zIndex: 100,
+            boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
+          }}
+          role="listbox"
+          aria-label={`Select ${popover.axis === 'x' ? 'X' : 'Y'}-axis dimension`}
+        >
+          {ALL_DIMENSIONS.map((dim) => {
+            const dimConfig = DIMENSIONS[dim];
+            const isSelected = dim === (popover.axis === 'x' ? xAxis : yAxis);
+            const isOtherAxis = dim === (popover.axis === 'x' ? yAxis : xAxis);
+            return (
+              <button
+                key={dim}
+                onClick={() => handleDimensionSelect(dim)}
+                role="option"
+                aria-selected={isSelected}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  width: '100%',
+                  padding: '10px 16px',
+                  border: 'none',
+                  background: isSelected ? 'rgba(255,255,255,0.1)' : 'transparent',
+                  color: '#fff',
+                  fontSize: '14px',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  opacity: isOtherAxis ? 0.5 : 1,
+                }}
+                onMouseEnter={(e) => {
+                  if (!isSelected) e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = isSelected ? 'rgba(255,255,255,0.1)' : 'transparent';
+                }}
+              >
+                <span style={{ width: 16, textAlign: 'center' }}>{isSelected ? '✓' : ''}</span>
+                <span>{dimConfig.label}</span>
+                {isOtherAxis && <span style={{ marginLeft: 'auto', fontSize: '11px', opacity: 0.6 }}>(swap)</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {computing && (
+        <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px', marginTop: 8 }}>
+          {stale ? 'Recomputing' : 'Computing'}... {Math.round(progress * 100)}%
+        </div>
+      )}
+    </div>
+  );
+}

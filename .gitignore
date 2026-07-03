@@ -1,0 +1,13 @@
+node_modules
+dist
+*.local
+.DS_Store
+__pycache__
+.ipynb_checkpoints
+.gstack/
+
+# Dataset: 56MB zip + 77MB extracted TSVs never enter git history (PLAN.md P-0).
+# To obtain: jeopardy_dataset_seasons_1-41.zip in repo root (see BRAINSTORM.md
+# External References), extract into data/. scripts/ regenerate app/public/*.json.
+data/
+*.zip

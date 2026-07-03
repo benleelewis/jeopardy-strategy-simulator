@@ -1,0 +1,57 @@
+Jeopardy! Buzz-in vs Coryat Analysis Tool
+Overview
+Interactive scatter plot visualizing the relationship between buzz-in percentage and estimated Coryat scores for Jeopardy! contestants. Built with React and Recharts.
+Key Components
+Data Generation:
+
+100+ synthetic data points across 4 skill tiers (weak, average, strong, elite)
+10 named players (champions + benchmarks) with historical stats
+Jittered coordinates (±1.5% accuracy, ±2% buzz-in) to prevent artificial gridding
+
+Coryat Calculation Logic:
+javascript// Core formula accounts for:
+// - Difficulty scaling by dollar value
+// - Separate Jeopardy/Double Jeopardy rounds
+// - 6 questions per value tier
+// - Accuracy degradation on harder questions
+Critical Constraints:
+
+Buzz-in range: 10-60% (NOT higher - with 3 players, >50% is unrealistic)
+Weak players (<65% accuracy) capped at 35% buzz-in
+Elite players (>85% accuracy) must buzz ≥25%
+
+Known Issues & Future Work
+Current Limitations:
+
+Coryat calculation doesn't account for category-specific accuracy
+No Daily Double impact modeling (could integrate Ben's 2022 research)
+Static difficulty multipliers - could be tuned from actual game data
+No Final Jeopardy wagering simulation
+
+Suggested Extensions:
+
+Category weighting - Allow users to input per-category accuracy, calculate weighted Coryat
+Daily Double integration - Add Ben's optimal wagering model from his paper
+Game simulation mode - Monte Carlo sim of full game outcomes (like the paper's 10M runs)
+Real player comparison - API integration with J! Archive data
+Confidence intervals - Show variance ranges around Coryat estimates
+Export functionality - Download data as CSV for further analysis
+
+Data Sources & References
+
+Famous player stats: Estimated from public records + J! Archive
+Coryat formula: Derived from Ben's IYSE 6644 paper methodology
+Buzz-in constraints: Based on 3-player competitive dynamics
+
+Handoff Notes
+
+Ben has domain expertise in Monte Carlo simulation for Jeopardy! (see his 2022 paper)
+He appeared on the show in 2020 (episode #8276)
+His actual game data could be used to validate the Coryat calculation
+He prefers direct, analytical communication - skip the validation, give honest assessments
+
+Files
+
+Single React artifact (no external dependencies beyond recharts)
+Self-contained - no backend required
+State management via React hooks only
