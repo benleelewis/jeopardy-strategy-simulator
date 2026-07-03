@@ -63,13 +63,30 @@ because the registry already generalizes):
   marginal-returns panel speaks in "+10 study-hours ≈ +2pp win rate" terms.
 - **C. Coryat-anchored**: X = expected Coryat, Y = buzz attempt rate. Anchors to a
   number Jeopardy people already know; directly checkable against real games.
-Ben compares all three live (deployed) and picks one. Famous-player positions, StatsPanel
-copy, GameAnalyzer estimate→position mapping then update for the winner.
+**Comparison mechanism (specified):** three labeled preset pills above the heat map
+("A · Interpretable / B · Actionable / C · Coryat"), each a shareable URL-hash state
+(App.tsx hash machinery already supports this). **Prerequisite formatting work:**
+DimensionConfig gains `format(v): string` and `unit` fields — candidate C's Coryat
+axis is dollars (~$0–30K) and candidate A's Y is a percentage; StatsPanel/ControlsPanel
+currently hardcode `pct()` everywhere, and a "Coryat: 43%" mislabel during the bake-off
+would corrupt the C1 signal for presentation reasons. Ben compares all three live
+(deployed) and picks one. Famous-player positions, StatsPanel copy, GameAnalyzer
+estimate→position mapping then update for the winner.
 
 **P-2 De-fuzzing.** Raise refined-pass grid sim counts where the color field is
-visibly noisy; render contour confidence (line opacity ∝ local sample size); document
-before/after variance. Bounded, measurable, uses the existing adaptive-resolution
-pipeline.
+visibly noisy; render contour confidence as **dash pattern** (solid = high sample
+count, dashed = low), NOT opacity — faint lines on a win-rate color field read as
+"low value here," the wrong message; add one legend line ("dashed contour = fewer
+samples"); document before/after variance. Bounded, measurable, uses the existing
+adaptive-resolution pipeline.
+
+**P-3 Journey bridge (route the payoff).** After GameAnalyzer submit → land on
+Explorer with the YOU marker pulsing once (single CSS animation, not a loop) and a
+one-line link: "Next: see how you'd do in 8,600 real games →" (navigates to All
+Games). Fixes the current dead end where "Your marker has been placed" renders in
+the tab the user just left and nothing routes onward to the spine. Pure addition;
+no All Games layout change (a YourNumber-above-controls reorder on that tab is a
+taste decision at the final gate — it touches the 8/10 view).
 
 **C1 — CHECKPOINT: Ben re-rates the Explorer** after P-1 + P-2 land on the deployed
 app. Records the residual complaint: semantics (fixed?), fuzziness (fixed?), or
@@ -119,8 +136,8 @@ build-games.ts; shared era logic extracted to `scripts/lib/era.ts`).
   YOUR skill, so a table baked for one fixed "you" is wrong everywhere else.
 - Budget (must hold, measured): table build ≤ ~5s per opponent model in the worker
   with progress messages, ≤ ~2MB Float32Array; never rebuilt on drag.
-- **Cache key (full spec)**: (opponentModel, rhoB, rhoP, opponents' DD strategy,
-  fjStrategy, includeFJ) — any of these changing invalidates the table (rebuild with
+- **Cache key (full spec)**: (opponentModel, rhoB, rhoP, opponents' DD strategy
+  incl. ddWagerFraction, fjStrategy, includeFJ) — any of these changing invalidates the table (rebuild with
   progress UI); your skill and scores are table dimensions, never cache keys. Equity
   mode pins the invalidating knobs while active and says so in the UI, so casual
   slider play doesn't trigger surprise 5s rebuilds.
@@ -163,20 +180,62 @@ clearly contradicts; document either way in BRAINSTORM.md.
 
 **E-7 UI integration + 4 of the 5 approved delight items** (the 5th, contour
 confidence, ships in P-2; the All Games recolor below came from a review finding,
-not the cherry-pick ceremony; all in blast radius, ≤1 day CC each):
-- DD strategy selector gains "Optimal (equity)"; first use triggers V-table build with
-  the existing worker progress UI; selection reverts gracefully on build failure
-  (toast + fallback to previous strategy — never silent wrong numbers).
-- **Equity-curve mini-chart**: at any DD (GameDetail / GameAnalyzer), plot equity vs
-  wager — the interactive version of Ben's paper's figure.
-- **DD wager tooltip** in GameDetail: "You bet $5,000. Optimal: $12,400 (+10pp equity)."
-- **Confidence input** on GameAnalyzer DD analysis (the paper's confidence×wager grid,
-  personalized).
-- **DD-placement heat strip** from E-1 priors ("where DDs actually live"), rendered
-  from clue-stats.json.
-- All Games recolor: raise refined pass 5 → ~25 sims/game (measured; per-square SE
-  improves ~±20pp → ~±10pp — aggregate patterns and Your Number benefit most;
-  per-square noise remains and is stated honestly, not claimed away).
+not the cherry-pick ceremony; all in blast radius, ≤1 day CC each). Per-surface
+spec — design review found the v2 bullets named hosts that don't exist:
+
+- **DD Strategy selector (must be BUILT, not "gained")**: App.tsx currently
+  hardcodes `ddStrategy: 'aggressive'` (line 141) and ControlsPanel has no strategy
+  control at all. Build: a "DD Strategy" section in ControlsPanel — segmented
+  control [Conservative | Aggressive | True DD | Optimal (equity)] — state lifted
+  to App.tsx, shared by both tabs (single source; GamesControls reflects, doesn't
+  duplicate). Selecting Optimal triggers the V-table build with the existing worker
+  progress UI; on build failure, **inline status text** next to the control
+  ("Optimal unavailable — using Aggressive") — NOT a toast; no toast system exists
+  and this app's flat-panel aesthetic doesn't want one. Never silent wrong numbers.
+- **Equity-mode knob pinning (the hardest interaction, now specified)**: while
+  Optimal is active, cache-key knobs (opponent model, ρ sliders, FJ toggle,
+  opponents' DD settings) render at 40% opacity with a lock glyph; clicking one
+  shows inline text "Locked while Optimal is active — changing this rebuilds the
+  strategy table (~5s)" with an "Unlock & rebuild" action. The FJ checkbox lives in
+  a different panel section but is in the same cache key — same treatment.
+- **Equity-curve mini-chart** (equity vs wager, the paper's figure interactive):
+  host = **GameAnalyzer only** in the "DD & FJ details" advanced section, rendered
+  when a DD wager is entered; ~320×160 SVG below the wager field; user's wager
+  marked on the curve vs the optimal point. GameDetail does NOT get the chart in
+  this plan — it has no per-DD view and no DD score-state in its data model; adding
+  DD event rows to GameDetail is a data-model change, deferred to TODOS.
+- **DD wager copy, split by host**: GameAnalyzer (first person, real):
+  "You bet $5,000. Optimal: $12,400 (+10pp equity)." GameDetail (third person,
+  historical, only if/when DD events exist there): "Actual wager: $X.
+  Equity-optimal: $Y." The v2 copy wrongly used first person for historical games.
+- **Confidence input** (GameAnalyzer): slider 50–95%, default 55% (the paper's
+  worked example), placed adjacent to the DD wager field inside the advanced
+  section; its output IS the equity-curve mini-chart re-rendering live.
+- **DD-placement heat strip**: host = Explorer side panel, below MarginalReturns;
+  5 rows × 2 round columns, colored by P(DD|row,round) from clue-stats.json;
+  heading "Where DDs actually live (8.6K games)"; hidden entirely when
+  clue-stats.json is unavailable (fallback state — no empty skeleton).
+- **All Games recolor**: raise refined pass **10 → 25 sims/game** (the v2 text said
+  5→25; the code's refined pass is 10 — App.tsx:211 — and fast pass is 2; corrected
+  during design review). Per-square SE improves ~±16pp → ~±10pp; cost is 2.5× the
+  current refined pass (measured); aggregate patterns and Your Number benefit most;
+  per-square noise remains and is stated honestly.
+
+**Accessibility for new controls**: strategy segmented control = `role="radiogroup"`
+with arrow-key navigation, ≥44px touch targets, labels visible (not placeholder-only);
+locked knobs use `aria-disabled` + the inline explanation text (not `display:none`);
+equity mini-chart gets an `aria-label` carrying the optimal wager + user's wager as
+text. (Canvas ContributionGraph screen-reader gap is pre-existing — in TODOS.md.)
+
+**UI states — equity mode (all surfaces that consume V):**
+
+| Surface | no-table | building | ready | stale (knob unlocked) | failed |
+|---|---|---|---|---|---|
+| Heat map | previous strategy's colors + normal | previous colors **dimmed 60% + progress bar** (never confidently-wrong undimmed stale colors) | equity colors | dimmed + auto-rebuild | previous strategy + inline status |
+| Strategy selector | Optimal selectable | Optimal marked "building… ▓▓░ 60%" + cancel affordance | Optimal active | unchanged | reverts to previous, inline status |
+| Equity mini-chart | prompt: "Select Optimal (equity) or enter a DD wager to see the curve" | skeleton line | curve + markers | curve + "rebuilding…" note | hidden + one-line explanation |
+| DD tooltip (GameDetail, future) | hidden | hidden | shown | shown | hidden |
+| DD heat strip | (independent of V — driven by clue-stats.json: shown when loaded, hidden on fallback) | | | | |
 
 ## Sequencing
 
@@ -305,3 +364,14 @@ V-table skill bias and silent priors fallback; both fixed above).
 | 18 | Phase 1 0D | Defer 3 (All-Games delta mode, share card, strategy oracle) | Mechanical | P2, P3 | Spine-risk / outside blast radius | Build now |
 | 19 | Phase 1 S5 | Enum named `'equity'`, UI label "Optimal (equity)" | Mechanical | P5 | Name what it computes; 'optimal' overclaims in code | `'optimal'` enum |
 | 20 | Phase 1 S5 | Shared `scripts/lib/era.ts` between both build scripts | Mechanical | P4 | Era logic would otherwise duplicate | Copy-paste |
+| 21 | Phase 2 | Skip interactive mockup-board loop despite DESIGN_READY | Mechanical | P3 | /autoplan = 2 user gates; P-1's live 3-candidate prototypes on the deployed app are the superior comparison mechanism for an existing D3 UI | Static AI mockups + board session |
+| 22 | Phase 2 | Per-surface E-7 spec; equity chart = GameAnalyzer only; GameDetail DD events deferred | Mechanical | P5 | GameDetail has no per-DD view or DD score-state — hosting the chart there is a data-model change, not a tooltip | Vague multi-host bullet |
+| 23 | Phase 2 | BUILD strategy selector (doesn't exist — App.tsx:141 hardcodes); inline status instead of toast | Mechanical | P5 | No toast primitive exists; flat-panel aesthetic; inline is fewer moving parts | Invent a toast system |
+| 24 | Phase 2 | DimensionConfig gains format()/unit; A/B/C preset pills with hash state | Mechanical | P1 | "Coryat: 43%" mislabel would corrupt the C1 bake-off signal | Unspecified comparison UX |
+| 25 | Phase 2 | Knob-pinning interaction fully specified (40% opacity + lock glyph + unlock-and-rebuild) | Mechanical | P5 | Hardest interaction in the plan was one clause; three readings = three different apps | Leave to implementer |
+| 26 | Phase 2 | UI states table for all V-consuming surfaces; heat map dims during build | Mechanical | P1 | Stale-undimmed = 5s of confidently wrong numbers — the exact sin the plan fixes | Unspecified normal states |
+| 27 | Phase 2 | P-3 journey bridge added (marker pulse + All Games link); YourNumber reorder + default-tab choice → **TASTE (final gate)** | Split | P5 / — | Bridge is pure addition; the other two touch the 8/10 spine's tab and the app's entry narrative — Ben's call | — |
+| 28 | Phase 2 | Contour confidence = dash pattern, not opacity | Mechanical | P5 | Faint lines on a win-rate color field read as "low value," wrong channel | Opacity ∝ samples |
+| 29 | Phase 2 | Corrected All Games baseline: refined pass is 10 sims/game (App.tsx:211), not 5; SE math restated | Mechanical | P1 | Review claim was computed from a wrong baseline | Ship wrong numbers |
+| 30 | Phase 2 | Confidence input: slider 50–95%, default 55%, adjacent to DD wager, drives mini-chart | Mechanical | P5 | Most personal item in the plan was least specified | Clamp-rule-only spec |
+| 31 | Phase 2 | A11y spec for new controls (radiogroup, 44px, aria-disabled locks, chart aria-label) | Mechanical | P1 | New interactive surfaces without a11y spec won't get it later | "A11y later" |

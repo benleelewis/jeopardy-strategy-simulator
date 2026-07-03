@@ -22,6 +22,11 @@ Deferred work with context. Created 2026-07-03 by /autoplan (CEO review deferral
 - [ ] **P3 — ContributionGraph screen-reader support.** Canvas has no accessible
   text alternative (pre-existing gap, noted during review). Offscreen summary table
   or aria-label with headline stats.
+- [ ] **P2 — GameDetail DD event rows.** GameDetail currently has no per-DD view and
+  its data model carries no DD score-state; adding DD event rows (wager, outcome,
+  score before/after) unlocks the third-person equity tooltip ("Actual wager: $X.
+  Equity-optimal: $Y") for historical games. Surfaced by Phase 2 design review of
+  PLAN.md E-7. Depends on: E-2/E-3 (V + equity), game data enrichment.
 - [ ] **P2 — DD impact difference map overlay** (carried from TASKS.md CEO-review
   list). Show WHERE DD strategy matters most on the K×B space. Natural companion to
   E-3 once equity wagering exists.
