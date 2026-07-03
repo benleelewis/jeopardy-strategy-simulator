@@ -82,8 +82,10 @@ taste decision surfaced at the /autoplan final gate.*
 - `simulateFromState(state)`: enter a game at an arbitrary board state (scores,
   remaining clue values, remaining DD count, round). Needed by V-table rollouts and
   the validation harness. Boundary: 0 clues remaining → straight to FJ.
-- Seeded RNG: thread an optional `rng: () => number` through the five call sites that
-  use `Math.random()` (default unchanged). Determinism test: same seed → same result.
+- Seeded RNG: thread an optional `rng: () => number` through **all** `Math.random()`
+  call sites in sim-engine.ts (currently 9 — lines 83, 98, 99, 171, 182, 228, 284,
+  332, 470; grep before starting, the count moves) (default unchanged). Determinism
+  test: same seed → same result.
 - Minimal stochastic board control: replace deterministic leader-takes-DD
   (sim-engine.ts:279) with score-weighted random control (configurable; default
   preserves current behavior until validated). Without this, V(S) encodes "trailing
@@ -116,8 +118,12 @@ build-games.ts; shared era logic extracted to `scripts/lib/era.ts`).
 - Your-skill bucketing is the fix for the v1 critical defect: the heat map sweeps
   YOUR skill, so a table baked for one fixed "you" is wrong everywhere else.
 - Budget (must hold, measured): table build ≤ ~5s per opponent model in the worker
-  with progress messages, ≤ ~2MB Float32Array, cached per (opponentModel) with skill
-  as table dims; never rebuilt on drag.
+  with progress messages, ≤ ~2MB Float32Array; never rebuilt on drag.
+- **Cache key (full spec)**: (opponentModel, rhoB, rhoP, opponents' DD strategy,
+  fjStrategy, includeFJ) — any of these changing invalidates the table (rebuild with
+  progress UI); your skill and scores are table dimensions, never cache keys. Equity
+  mode pins the invalidating knobs while active and says so in the UI, so casual
+  slider play doesn't trigger surprise 5s rebuilds.
 - Invariants tested: V monotone ↑ in your score; V→1 for pre-FJ lock with FJ off;
   V clamped [0,1]; out-of-range queries clamp to table bounds.
 
@@ -155,8 +161,9 @@ malformed file → console.warn + fallback (visible, never silent). Difficulty-c
 comparison vs the tsx-derived `difficultyMultiplier`: recalibrate only if data
 clearly contradicts; document either way in BRAINSTORM.md.
 
-**E-7 UI integration + approved delight items** (all in blast radius, ≤1 day CC each,
-approved during cherry-pick ceremony):
+**E-7 UI integration + 4 of the 5 approved delight items** (the 5th, contour
+confidence, ships in P-2; the All Games recolor below came from a review finding,
+not the cherry-pick ceremony; all in blast radius, ≤1 day CC each):
 - DD strategy selector gains "Optimal (equity)"; first use triggers V-table build with
   the existing worker progress UI; selection reverts gracefully on build failure
   (toast + fallback to previous strategy — never silent wrong numbers).
@@ -176,8 +183,8 @@ approved during cherry-pick ceremony):
 ```
 Track P: P-0 → P-1 ┬→ C1 (re-rate) ──────────────┐
                    └ P-2 ┘                        │ informs (or gates — final-gate
-Track E: E-1 → E-0 → E-2 → E-3 → E-4 → E-5 → E-6 → E-7
-         (E-1 first: empirical p_DD feeds E-2 rollouts; E-4 gates E-5:
+Track E: {E-0, E-1 — order-independent, both before E-2} → E-2 → E-3 → E-4 → E-5 → E-6 → E-7
+         (E-1's empirical p_DD feeds E-2 rollouts; E-4 gates E-5:
           validate DD equity before touching FJ)
 ```
 Tracks run in parallel; the axis decision does NOT gate engine work (the v1 claim
