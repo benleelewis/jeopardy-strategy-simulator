@@ -10,6 +10,11 @@
  *   - Wrong answer penalties (lose points + rebound chance)
  *   - Daily Doubles (1 in J, 2 in DJ, bottom-row bias)
  *   - Final Jeopardy (score-position wagering, correlated accuracy)
+ *
+ * Randomness: every stochastic function takes an optional `rng: () => number`
+ * (a drop-in replacement for Math.random, e.g. `mulberry32(seed)` below).
+ * Omitting it preserves the original Math.random behavior exactly — this
+ * threading is additive-only, never a behavior change for existing callers.
  */
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -23,8 +28,29 @@ export interface Player {
 
 export type DDStrategy = 'off' | 'conservative' | 'aggressive' | 'truedd';
 
+/**
+ * Who controls the board when a Daily Double is hit.
+ * - 'leader' (default): deterministic — highest score always controls.
+ *   This is the original/current behavior and is regression-locked.
+ * - 'score-weighted': stochastic — max(score, 0) + epsilon per player, so
+ *   trailing (or negative-score) players occasionally control the board too.
+ *   Without this option, deterministic leader-control biases any V(S) built
+ *   from rollouts: "trailing players never get DDs" isn't true in real games.
+ */
+export type BoardControl = 'leader' | 'score-weighted';
+
 export interface SimConfig {
+  /** Your (player 0) DD wagering strategy. */
   ddStrategy: DDStrategy;
+  /**
+   * Opponents' (players 1 and 2) DD wagering strategy. Defaults to
+   * `ddStrategy` when omitted, so configs written before this split (E-0)
+   * keep applying one strategy to everyone with no caller changes needed.
+   * Scoping choice: `ddWagerFraction` below stays a single global override
+   * (it predates the strategy split and no work item asked to split it) —
+   * only the discrete `ddStrategy` enum is split per player here.
+   */
+  opponentDdStrategy?: DDStrategy;
   includeFJ: boolean;
   /** Buzz attempt correlation between players (Tesauro: 0.2) */
   rhoB: number;
@@ -33,6 +59,8 @@ export interface SimConfig {
   /** Continuous DD wager fraction [0,1]. When set, overrides ddStrategy enum.
    *  0 = minimum bet, 0.5 = half of score, 1.0 = true daily double. */
   ddWagerFraction?: number;
+  /** Board control model for Daily Doubles. Defaults to 'leader'. */
+  boardControl?: BoardControl;
 }
 
 export const DEFAULT_CONFIG: SimConfig = {
@@ -40,6 +68,7 @@ export const DEFAULT_CONFIG: SimConfig = {
   includeFJ: true,
   rhoB: 0.2,
   rhoP: 0.2,
+  boardControl: 'leader',
 };
 
 export interface GameResult {
@@ -72,6 +101,24 @@ const DJ_VALUES = [400, 800, 1200, 1600, 2000];
  */
 const DD_ROW_WEIGHTS = [0.02, 0.04, 0.15, 0.31, 0.48];
 
+// ─── Seeded RNG ────────────────────────────────────────────────────────
+
+/**
+ * Small seedable PRNG (mulberry32). Not cryptographic — just fast, simple,
+ * and good enough entropy for Monte Carlo simulation and reproducible tests.
+ * Returns a () => number in [0, 1), a drop-in replacement for Math.random.
+ */
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return function (): number {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 // ─── Correlated random draws ─────────────────────────────────────────
 
 /**
@@ -79,12 +126,12 @@ const DD_ROW_WEIGHTS = [0.02, 0.04, 0.15, 0.31, 0.48];
  * Uses a latent Gaussian copula: shared factor + individual noise.
  * rho = correlation between any two players' draws.
  */
-function correlatedBernoulli(probs: number[], rho: number): boolean[] {
-  if (rho <= 0) return probs.map(p => Math.random() < p);
+function correlatedBernoulli(probs: number[], rho: number, rng: () => number = Math.random): boolean[] {
+  if (rho <= 0) return probs.map(p => rng() < p);
 
-  const shared = gaussianRandom();
+  const shared = gaussianRandom(rng);
   return probs.map(p => {
-    const individual = gaussianRandom();
+    const individual = gaussianRandom(rng);
     const latent = Math.sqrt(rho) * shared + Math.sqrt(1 - rho) * individual;
     // Convert probability to threshold via probit (inverse normal CDF)
     const threshold = probitApprox(p);
@@ -93,10 +140,10 @@ function correlatedBernoulli(probs: number[], rho: number): boolean[] {
 }
 
 /** Box-Muller transform for standard normal */
-function gaussianRandom(): number {
+function gaussianRandom(rng: () => number = Math.random): number {
   let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
   return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 
@@ -166,24 +213,115 @@ function difficultyMultiplier(value: number, round: 'J' | 'DJ'): number {
 
 // ─── Daily Double ────────────────────────────────────────────────────
 
-/** Pick which row (0-4) a DD lands on, using weighted random. */
-function pickDDRow(): number {
-  let r = Math.random();
-  for (let i = 0; i < DD_ROW_WEIGHTS.length; i++) {
-    r -= DD_ROW_WEIGHTS[i];
+/**
+ * Weighted random pick over probabilities that (approximately) sum to 1.
+ * r = rng(); subtract weights in order; fall back to the last index on
+ * float rounding. Shared by DD row placement and (optionally) board control.
+ */
+function weightedPick(weights: number[], rng: () => number): number {
+  let r = rng();
+  for (let i = 0; i < weights.length; i++) {
+    r -= weights[i];
     if (r <= 0) return i;
   }
-  return 4;
+  return weights.length - 1;
 }
 
-/** Pick DD clue index within a round's 30 clues (6 categories × 5 values). */
-function pickDDClueIndex(): number {
-  const row = pickDDRow();
-  const category = Math.floor(Math.random() * 6);
-  return category * 5 + row;
+/**
+ * Pick `count` distinct positions within `remainingValues` (a partial or full
+ * round's clue list) where Daily Doubles land.
+ *
+ * Renormalizes DD_ROW_WEIGHTS over only the rows still represented in the
+ * remaining clue list — a uniform draw over leftover slots would silently
+ * wash out the empirical bottom-row bias (e.g. a board with only bottom-row
+ * clues left must place DDs there with probability 1, not spread them
+ * uniformly across whatever's left).
+ *
+ * Full-board equivalence (regression lock): when every row is still active
+ * (the ordinary full 30-clue board), this reduces to exactly the original
+ * two-draw algorithm (row via DD_ROW_WEIGHTS, then category uniformly among
+ * the 6 categories in that row) — same rng call sequence, same math, so
+ * seeded full-game results are bit-identical to the pre-refactor engine.
+ */
+function pickDDIndices(
+  remainingValues: number[],
+  round: 'J' | 'DJ',
+  count: number,
+  rng: () => number,
+): Set<number> {
+  const roundValues = round === 'J' ? J_VALUES : DJ_VALUES;
+
+  // Bucket remaining clue positions by row (row = index of the value within
+  // the round's 5 row values — J/DJ values are distinct per row).
+  const rowBuckets: number[][] = roundValues.map(() => []);
+  remainingValues.forEach((v, i) => {
+    const row = roundValues.indexOf(v);
+    if (row >= 0) rowBuckets[row].push(i);
+  });
+
+  const activeRowIdx: number[] = [];
+  for (let row = 0; row < rowBuckets.length; row++) {
+    if (rowBuckets[row].length > 0) activeRowIdx.push(row);
+  }
+
+  const fullBoard = activeRowIdx.length === roundValues.length;
+  const activeWeights = fullBoard
+    ? DD_ROW_WEIGHTS // raw weights, untouched — preserves the regression lock exactly
+    : (() => {
+        const total = activeRowIdx.reduce((sum, row) => sum + DD_ROW_WEIGHTS[row], 0);
+        return activeRowIdx.map(row => DD_ROW_WEIGHTS[row] / total);
+      })();
+
+  const ddIndices = new Set<number>();
+  const maxPossible = remainingValues.length;
+  while (ddIndices.size < count && ddIndices.size < maxPossible) {
+    const pick = weightedPick(activeWeights, rng);
+    const row = activeRowIdx[pick];
+    const bucket = rowBuckets[row];
+    const posInBucket = Math.floor(rng() * bucket.length);
+    ddIndices.add(bucket[posInBucket]);
+  }
+
+  return ddIndices;
 }
 
-/** Calculate DD wager based on strategy and current score. */
+/**
+ * Pick which player controls the board when a Daily Double is hit.
+ * See `BoardControl` doc comment for the two modes.
+ */
+function pickController(
+  scores: [number, number, number],
+  boardControl: BoardControl,
+  rng: () => number,
+): number {
+  if (boardControl === 'score-weighted') {
+    const epsilon = 1; // keeps a $0-or-negative player's weight nonzero
+    const weights = scores.map(s => Math.max(s, 0) + epsilon);
+    const total = weights.reduce((a, b) => a + b, 0);
+    return weightedPick(weights.map(w => w / total), rng);
+  }
+  // 'leader' (default, original behavior): highest score controls the board —
+  // a simplification that's realistic for strong players who tend to keep it.
+  return scores[0] >= scores[1] && scores[0] >= scores[2] ? 0
+    : scores[1] >= scores[2] ? 1 : 2;
+}
+
+/**
+ * Exhaustiveness guard: if DDStrategy ever gains a member ddWager doesn't
+ * handle (e.g. a future 'equity' — which per the engine's design dispatches
+ * BEFORE ddWager and must never reach this switch), TypeScript fails to
+ * compile here instead of silently falling through to `minWager`.
+ */
+function assertNeverDDStrategy(strategy: never): never {
+  throw new Error(`Unhandled DD strategy: ${String(strategy)}`);
+}
+
+/**
+ * Calculate DD wager based on strategy and current score.
+ * Modeling simplification: minWager = maxClueValue (not the real-rules $5
+ * floor) — kept as-is for these heuristic presets; a future equity search
+ * (E-3) uses the real $5 floor and documents that divergence separately.
+ */
 export function ddWager(strategy: DDStrategy, score: number, maxClueValue: number, wagerFraction?: number): number {
   if (strategy === 'off') return 0;
   const minWager = maxClueValue; // minimum DD wager is the max clue value in the round
@@ -202,7 +340,7 @@ export function ddWager(strategy: DDStrategy, score: number, maxClueValue: numbe
     case 'truedd':
       return Math.max(minWager, safeScore);
     default:
-      return minWager;
+      return assertNeverDDStrategy(strategy);
   }
 }
 
@@ -213,7 +351,7 @@ export function ddWager(strategy: DDStrategy, score: number, maxClueValue: numbe
  * Uses buzzerSpeed as relative weight (like v2 prototype).
  * Returns player index, or -1 if nobody buzzes.
  */
-function resolveBuzzer(knowsAnswer: boolean[], players: Player[]): number {
+function resolveBuzzer(knowsAnswer: boolean[], players: Player[], rng: () => number = Math.random): number {
   const weights: number[] = [];
   let totalWeight = 0;
   for (let i = 0; i < players.length; i++) {
@@ -225,7 +363,7 @@ function resolveBuzzer(knowsAnswer: boolean[], players: Player[]): number {
   // NaN guard: if nobody is eligible, skip
   if (totalWeight <= 0) return -1;
 
-  let rand = Math.random() * totalWeight;
+  let rand = rng() * totalWeight;
   for (let i = 0; i < weights.length; i++) {
     rand -= weights[i];
     if (rand <= 0) return i;
@@ -235,53 +373,68 @@ function resolveBuzzer(knowsAnswer: boolean[], players: Player[]): number {
 
 // ─── Core simulation ─────────────────────────────────────────────────
 
-/**
- * Simulate a single round (Jeopardy or Double Jeopardy).
- *
- * DRY: handles both rounds with parameterized clue values.
- * Returns updated scores and events.
- */
-function simulateRound(
-  players: Player[],
-  scores: [number, number, number],
-  values: number[],
-  round: 'J' | 'DJ',
-  config: SimConfig,
-  trackHistory: boolean,
-): { scores: [number, number, number]; history: [number, number, number][]; ddEvents: DDEvent[] } {
-  const history: [number, number, number][] = [];
-  const ddEvents: DDEvent[] = [];
-
-  // Build clue list: 6 categories × 5 values = 30 clues
+/** Build a full round's 30-clue list: 6 categories × the round's 5 row values, in board order. */
+function buildFullBoard(values: number[]): number[] {
   const clues: number[] = [];
   for (let cat = 0; cat < 6; cat++) {
     for (const v of values) {
       clues.push(v);
     }
   }
+  return clues;
+}
 
-  // Place Daily Doubles
-  const ddCount = round === 'J' ? 1 : 2;
-  const ddIndices = new Set<number>();
-  if (config.ddStrategy !== 'off') {
-    while (ddIndices.size < ddCount) {
-      ddIndices.add(pickDDClueIndex());
-    }
-  }
+/**
+ * Simulate a (possibly partial) round of Jeopardy or Double Jeopardy.
+ *
+ * `clueValues` is the flat list of remaining clue values — the full 30-clue
+ * board for a fresh round, or a shorter list for a partial board entered
+ * via `simulateFromState`. `ddCount` is how many (still-unrevealed) Daily
+ * Doubles remain to be placed among them.
+ *
+ * DRY: handles both rounds with parameterized clue values.
+ * Returns updated scores and events.
+ */
+export function simulateRound(
+  players: Player[],
+  scores: [number, number, number],
+  clueValues: number[],
+  ddCount: number,
+  round: 'J' | 'DJ',
+  config: SimConfig,
+  trackHistory: boolean,
+  rng: () => number = Math.random,
+): { scores: [number, number, number]; history: [number, number, number][]; ddEvents: DDEvent[] } {
+  const history: [number, number, number][] = [];
+  const ddEvents: DDEvent[] = [];
+
+  const clues = clueValues;
+  const roundValues = round === 'J' ? J_VALUES : DJ_VALUES;
+  const maxClueValue = roundValues[roundValues.length - 1];
+  const boardControl: BoardControl = config.boardControl ?? 'leader';
+
+  // Place Daily Doubles (renormalized over the rows still in play — see pickDDIndices).
+  const ddIndices = config.ddStrategy !== 'off'
+    ? pickDDIndices(clues, round, ddCount, rng)
+    : new Set<number>();
 
   for (let i = 0; i < clues.length; i++) {
     const value = clues[i];
     const dm = difficultyMultiplier(value, round);
 
     if (ddIndices.has(i) && config.ddStrategy !== 'off') {
-      // Daily Double: whoever has board control gets it
-      // Simplification: player with highest score gets control (realistic for strong players)
-      const controller = scores[0] >= scores[1] && scores[0] >= scores[2] ? 0
-        : scores[1] >= scores[2] ? 1 : 2;
+      // Daily Double: board control decides who gets it (see BoardControl).
+      const controller = pickController(scores, boardControl, rng);
       const player = players[controller];
-      const wager = ddWager(config.ddStrategy, scores[controller], values[values.length - 1], config.ddWagerFraction);
+      // Per-player DD strategy: your (player 0) wagering heuristic can
+      // differ from opponents'. opponentDdStrategy defaults to ddStrategy
+      // for backward compatibility with configs written before this split.
+      const controllerStrategy = controller === 0
+        ? config.ddStrategy
+        : (config.opponentDdStrategy ?? config.ddStrategy);
+      const wager = ddWager(controllerStrategy, scores[controller], maxClueValue, config.ddWagerFraction);
       const adjustedP = player.p * dm;
-      const correct = Math.random() < adjustedP;
+      const correct = rng() < adjustedP;
       const scoreBefore = scores[controller];
 
       if (correct) {
@@ -303,14 +456,14 @@ function simulateRound(
       // Regular clue
       // Correlated buzz attempts
       const buzzProbs = players.map(p => p.b);
-      const attempts = correlatedBernoulli(buzzProbs, config.rhoB);
+      const attempts = correlatedBernoulli(buzzProbs, config.rhoB, rng);
 
       // For those who attempt, check accuracy with difficulty scaling
       const accuracyProbs = players.map(p => p.p * dm);
-      const knowsAnswer = correlatedBernoulli(accuracyProbs, config.rhoP)
+      const knowsAnswer = correlatedBernoulli(accuracyProbs, config.rhoP, rng)
         .map((correct, idx) => correct && attempts[idx]);
 
-      const winner = resolveBuzzer(knowsAnswer, players);
+      const winner = resolveBuzzer(knowsAnswer, players, rng);
 
       if (winner >= 0) {
         scores[winner] += value;
@@ -322,6 +475,7 @@ function simulateRound(
           const wrongBuzzer = resolveBuzzer(
             attemptPlayers.map(() => true),
             attemptPlayers.map(idx => players[idx]),
+            rng,
           );
           if (wrongBuzzer >= 0) {
             const wrongPlayer = attemptPlayers[wrongBuzzer];
@@ -329,14 +483,15 @@ function simulateRound(
 
             // Rebound: remaining players get a chance
             const reboundEligible = players.map((_, idx) =>
-              idx !== wrongPlayer && attempts[idx] !== true && Math.random() < players[idx].b,
+              idx !== wrongPlayer && attempts[idx] !== true && rng() < players[idx].b,
             );
             const reboundAccuracy = correlatedBernoulli(
               players.map(p => p.p * dm),
               config.rhoP,
+              rng,
             ).map((correct, idx) => correct && reboundEligible[idx]);
 
-            const reboundWinner = resolveBuzzer(reboundAccuracy, players);
+            const reboundWinner = resolveBuzzer(reboundAccuracy, players, rng);
             if (reboundWinner >= 0) {
               scores[reboundWinner] += value;
             }
@@ -362,10 +517,11 @@ function simulateRound(
  * - 3rd place bets everything.
  * Correlated accuracy (ρ_p = 0.3 per Tesauro).
  */
-function simulateFinalJeopardy(
+export function simulateFinalJeopardy(
   players: Player[],
   scores: [number, number, number],
   _config: SimConfig,
+  rng: () => number = Math.random,
 ): [number, number, number] {
   const sorted = [0, 1, 2].sort((a, b) => scores[b] - scores[a]);
   const leader = sorted[0];
@@ -395,7 +551,7 @@ function simulateFinalJeopardy(
 
   // Correlated accuracy (slightly higher correlation for FJ)
   const fjProbs = players.map(p => p.fjAccuracy);
-  const correct = correlatedBernoulli(fjProbs, 0.3);
+  const correct = correlatedBernoulli(fjProbs, 0.3, rng);
 
   for (let i = 0; i < 3; i++) {
     if (!canPlay[i]) continue;
@@ -426,27 +582,101 @@ export function simulateGame(
   opp2: Player,
   config: SimConfig = DEFAULT_CONFIG,
   trackHistory = false,
+  rng: () => number = Math.random,
 ): GameResult {
   const players: Player[] = [you, opp1, opp2];
   let scores: [number, number, number] = [0, 0, 0];
   let allHistory: [number, number, number][] = [];
   let allDDEvents: DDEvent[] = [];
 
-  // Jeopardy Round
-  const jResult = simulateRound(players, scores, J_VALUES, 'J', config, trackHistory);
+  // Jeopardy Round (1 DD over the full 30-clue board)
+  const jResult = simulateRound(players, scores, buildFullBoard(J_VALUES), 1, 'J', config, trackHistory, rng);
   scores = jResult.scores;
   allHistory = allHistory.concat(jResult.history);
   allDDEvents = allDDEvents.concat(jResult.ddEvents);
 
-  // Double Jeopardy Round
-  const djResult = simulateRound(players, scores, DJ_VALUES, 'DJ', config, trackHistory);
+  // Double Jeopardy Round (2 DDs over the full 30-clue board)
+  const djResult = simulateRound(players, scores, buildFullBoard(DJ_VALUES), 2, 'DJ', config, trackHistory, rng);
   scores = djResult.scores;
   allHistory = allHistory.concat(djResult.history);
   allDDEvents = allDDEvents.concat(djResult.ddEvents);
 
   // Final Jeopardy
   if (config.includeFJ) {
-    scores = simulateFinalJeopardy(players, scores, config);
+    scores = simulateFinalJeopardy(players, scores, config, rng);
+    if (trackHistory) {
+      allHistory.push([...scores] as [number, number, number]);
+    }
+  }
+
+  const maxScore = Math.max(...scores);
+  const winner = scores.indexOf(maxScore);
+
+  return {
+    scores,
+    winner,
+    history: trackHistory ? allHistory : undefined,
+    ddEvents: trackHistory ? allDDEvents : undefined,
+  };
+}
+
+/**
+ * A mid-game state to resume simulation from: partial-round remainder
+ * (clue values + Daily Doubles not yet placed), plus current scores.
+ */
+export interface SimState {
+  scores: [number, number, number];
+  round: 'J' | 'DJ';
+  remainingClueValues: number[];
+  remainingDDCount: number;
+}
+
+/**
+ * Enter a game at an arbitrary mid-game state and play out the rest.
+ *
+ * Composes the same simulateRound / simulateFinalJeopardy building blocks as
+ * simulateGame, but starting from a partial board — this is what V(S)
+ * rollouts (E-2) use so the value function is fit from real mid-game states,
+ * not only from full-game starts.
+ *
+ * Boundary: 0 clues remaining in DJ skips straight to Final Jeopardy (no
+ * empty round is simulated). 0 clues remaining in J still plays a full DJ
+ * round afterward.
+ */
+export function simulateFromState(
+  state: SimState,
+  players: Player[],
+  config: SimConfig = DEFAULT_CONFIG,
+  rng: () => number = Math.random,
+  trackHistory = false,
+): GameResult {
+  let scores: [number, number, number] = [...state.scores];
+  let allHistory: [number, number, number][] = [];
+  let allDDEvents: DDEvent[] = [];
+
+  // Finish whatever's left of the round we're currently in.
+  if (state.remainingClueValues.length > 0) {
+    const result = simulateRound(
+      players, scores, state.remainingClueValues, state.remainingDDCount,
+      state.round, config, trackHistory, rng,
+    );
+    scores = result.scores;
+    allHistory = allHistory.concat(result.history);
+    allDDEvents = allDDEvents.concat(result.ddEvents);
+  }
+
+  // If we started mid-Jeopardy, Double Jeopardy is played in full next.
+  if (state.round === 'J') {
+    const djResult = simulateRound(
+      players, scores, buildFullBoard(DJ_VALUES), 2, 'DJ', config, trackHistory, rng,
+    );
+    scores = djResult.scores;
+    allHistory = allHistory.concat(djResult.history);
+    allDDEvents = allDDEvents.concat(djResult.ddEvents);
+  }
+
+  if (config.includeFJ) {
+    scores = simulateFinalJeopardy(players, scores, config, rng);
     if (trackHistory) {
       allHistory.push([...scores] as [number, number, number]);
     }
@@ -466,8 +696,11 @@ export function simulateGame(
 /**
  * Sample a random opponent from a profile, with ±5% jitter.
  */
-export function sampleOpponent(profile: { b: number; p: number; fjAccuracy: number }): Player {
-  const jitter = () => (Math.random() - 0.5) * 0.1;
+export function sampleOpponent(
+  profile: { b: number; p: number; fjAccuracy: number },
+  rng: () => number = Math.random,
+): Player {
+  const jitter = () => (rng() - 0.5) * 0.1;
   return {
     b: clamp(profile.b + jitter(), 0, 1),
     p: clamp(profile.p + jitter(), 0, 1),
@@ -514,14 +747,15 @@ export function calculateWinRate(
   config: SimConfig = DEFAULT_CONFIG,
   nGames = 1000,
   returnResults = false,
+  rng: () => number = Math.random,
 ): { winRate: number; results?: GameResult[] } {
   let wins = 0;
   const results: GameResult[] = [];
 
   for (let i = 0; i < nGames; i++) {
-    const opp1 = sampleOpponent(opponentProfile);
-    const opp2 = sampleOpponent(opponentProfile);
-    const result = simulateGame(you, opp1, opp2, config, returnResults);
+    const opp1 = sampleOpponent(opponentProfile, rng);
+    const opp2 = sampleOpponent(opponentProfile, rng);
+    const result = simulateGame(you, opp1, opp2, config, returnResults, rng);
 
     if (result.winner === 0) wins++;
     if (returnResults) results.push(result);
