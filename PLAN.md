@@ -48,10 +48,14 @@ board control gets a minimal stochastic model only so V(S) isn't biased.
 
 ### Track P — Product (ships first, cheap, directly targets the 5/10)
 
-**P-0 Baseline commit + deploy.** Commit the entire current `app/` + `scripts/` +
-`data/` state to git (it is currently untracked — no rollback point exists). Deploy
-to Vercel (TASKS.md Phase 0 checkbox). Every later item lands as a diff against a
-shipped baseline.
+**P-0 Baseline commit + deploy.** FIRST add `.gitignore` rules for `data/`,
+`*.zip`, and `app/public/games.json`-scale artifacts as appropriate (eng review:
+the 56MB dataset zip at repo root and the 77MB extracted TSV would otherwise enter
+git history permanently — cheap to prevent, expensive to rewrite out). THEN commit
+the current `app/` + `scripts/` source state (currently untracked — no rollback
+point exists), with a documented "how to obtain the dataset" note replacing the
+data itself. Deploy to Vercel (TASKS.md Phase 0 checkbox). Every later item lands
+as a diff against a shipped baseline.
 
 **P-1 Axis semantics prototype (3 candidates, then Ben picks).** Build all three axis
 framings behind the existing `dimensions.ts` registry (est. ~1 day CC total, cheap
@@ -61,6 +65,10 @@ because the registry already generalizes):
   conflation directly.
 - **B. Actionable units**: knowledge × buzzer as today, but recalibrated so the
   marginal-returns panel speaks in "+10 study-hours ≈ +2pp win rate" terms.
+  (Eng note: candidate A's Y-axis, buzz-race win % vs the field, has no closed-form
+  inverse to `buzzerSpeed` — it needs a small one-time calibration curve (forward
+  Monte Carlo sweep, then interpolate the inverse). Budget A at ~½ day extra; B and
+  C are direct transforms.)
 - **C. Coryat-anchored**: X = expected Coryat, Y = buzz attempt rate. Anchors to a
   number Jeopardy people already know; directly checkable against real games.
 **Comparison mechanism (specified):** three labeled preset pills above the heat map
@@ -95,10 +103,25 @@ taste decision surfaced at the /autoplan final gate.*
 
 ### Track E — Engine (equity wagering + real calibration)
 
-**E-0 Engine plumbing (prerequisite, was unbudgeted in v1).**
-- `simulateFromState(state)`: enter a game at an arbitrary board state (scores,
-  remaining clue values, remaining DD count, round). Needed by V-table rollouts and
-  the validation harness. Boundary: 0 clues remaining → straight to FJ.
+**E-0 Engine plumbing (prerequisite, was unbudgeted in v1).** Honest scope (eng
+review): this is a **refactor of the round-simulation core**, not a thin wrapper —
+`simulateRound` and `simulateFinalJeopardy` are unexported and hard-coded to full
+30-clue boards with fresh DD placement (sim-engine.ts:244, :365).
+- Refactor `simulateRound` to accept a partial board (remaining clue values,
+  remaining DD count) and export it + `simulateFinalJeopardy`; then
+  `simulateFromState(state)` composes them. Boundary: 0 clues remaining → straight
+  to FJ. Existing full-game behavior must be regression-locked (seeded snapshot
+  test before refactor, identical results after).
+- **Partial-board DD placement (specified)**: renormalize `DD_ROW_WEIGHTS` over
+  only the rows still in play — a uniform draw over leftover slots would silently
+  wash out the empirical prior E-1 exists to provide.
+- **Per-player DD strategy split**: SimConfig's single global `ddStrategy`
+  currently applies to whichever player controls the DD (sim-engine.ts:282) — you
+  AND opponents. Split into your strategy vs opponents' strategy (the E-2 cache key
+  already assumed this split; it's now a named work item). Equity dispatch happens
+  BEFORE `ddWager()` — the `'equity'` value never enters `ddWager`'s switch, and a
+  TypeScript exhaustiveness check (`never` guard) makes a fall-through to
+  `default: minWager` a compile error instead of a silent min-bet game.
 - Seeded RNG: thread an optional `rng: () => number` through **all** `Math.random()`
   call sites in sim-engine.ts (currently 9 — lines 83, 98, 99, 171, 182, 228, 284,
   332, 470; grep before starting, the count moves) (default unchanged). Determinism
@@ -110,6 +133,9 @@ taste decision surfaced at the /autoplan final gate.*
 
 **E-1 Clue-level dataset parser** (`scripts/build-clue-stats.ts`, mirrors
 build-games.ts; shared era logic extracted to `scripts/lib/era.ts`).
+- **Prerequisite (was unstated)**: extract `combined_season1-41.tsv` (77MB) from
+  the repo-root zip into `data/` — it is not currently on disk; only the scoring
+  TSVs are. The extracted file stays gitignored (see P-0).
 - Schema (verified): round, clue_value, daily_double_value, category, comments,
   answer, question, air_date, notes. DD rows keep face value; wager in
   daily_double_value.
@@ -117,8 +143,12 @@ build-games.ts; shared era logic extracted to `scripts/lib/era.ts`).
   DD wager distribution **as fraction of round max only** (wager-vs-score cut —
   no score-at-DD-time exists in the data); board-completeness stats (exclude
   incomplete boards, same philosophy as build-games.ts).
-- Edge cases handled explicitly: malformed rows (skip + count), tiebreaker rounds,
-  missing air_date (excluded from era-sensitive stats), zero-value rows.
+- Edge cases handled explicitly: malformed rows (skip + count), missing air_date
+  (excluded from era-sensitive stats), zero-value rows. Round column verified to
+  take only {1, 2, 3} with round 3 = FJ (clue_value 0, one per game — excluded
+  from DD stats). Tiebreaker clues are NOT distinguishable in this schema; verify
+  during implementation whether any signal exists (duplicate category per
+  air_date) and document the answer rather than claiming handled.
 - Output `app/public/clue-stats.json` (aggregated priors only) with `generatedAt` +
   source row counts embedded for debuggability.
 - Acceptance: DD count ≈ 3 × ~8.6K games ≈ 26K; fitted prior sanity vs folklore
@@ -136,6 +166,11 @@ build-games.ts; shared era logic extracted to `scripts/lib/era.ts`).
   YOUR skill, so a table baked for one fixed "you" is wrong everywhere else.
 - Budget (must hold, measured): table build ≤ ~5s per opponent model in the worker
   with progress messages, ≤ ~2MB Float32Array; never rebuilt on drag.
+- **Where the table lives (specified — two workers exist)**: HeatMap owns its own
+  worker instance and App.tsx holds a separate persistent `gameWorkerRef`
+  (App.tsx:180). The V-table is built ONCE in the persistent worker, posted back as
+  a transferable Float32Array, cached in App state, and handed to any worker that
+  needs it on init/config-change — never built twice for a tab switch.
 - **Cache key (full spec)**: (opponentModel, rhoB, rhoP, opponents' DD strategy
   incl. ddWagerFraction, fjStrategy, includeFJ) — any of these changing invalidates the table (rebuild with
   progress UI); your skill and scores are table dimensions, never cache keys. Equity
@@ -144,9 +179,13 @@ build-games.ts; shared era logic extracted to `scripts/lib/era.ts`).
 - Invariants tested: V monotone ↑ in your score; V→1 for pre-FJ lock with FJ off;
   V clamped [0,1]; out-of-range queries clamp to table bounds.
 
-**E-3 Equity DD wagering.** New SimConfig strategy **`'equity'`** (UI label
-"Optimal (equity)"; named for what it computes, not an overclaim). At a DD:
-argmax over bet grid (minWager → all-in, ~$500 steps ≤ 40 evaluations) of
+**E-3 Equity DD wagering.** New strategy **`'equity'`** for YOUR player only
+(opponents keep their configured heuristic — per-player split from E-0; UI label
+"Optimal (equity)"). At a DD: argmax over bet grid (**$5 real-rules floor** for the
+equity search — the engine's existing `minWager = maxClueValue` simplification at
+sim-engine.ts:189 stays for heuristic presets but is documented as a modeling
+choice, not carried silently into the "validated" layer; grid $5 → all-in, ~$500
+steps ≤ 40 evaluations) of
 `Equity(bet) = p × V(S₊) + (1−p) × V(S₋)`, p = difficulty-adjusted precision
 (same machinery as regular DD resolution). Existing presets untouched; `'equity'`
 is additive; default config unchanged (rollback = revert commit).
@@ -221,6 +260,17 @@ spec — design review found the v2 bullets named hosts that don't exist:
   current refined pass (measured); aggregate patterns and Your Number benefit most;
   per-square noise remains and is stated honestly.
 
+**UI test infrastructure (was absent — eng review)**: the repo has zero UI test
+capability (only sim-engine.test.ts; no @testing-library/react, no jsdom). E-7 adds
+both: `@testing-library/react` + jsdom environment, with interaction tests for the
+plan's hardest surfaces — knob lock/unlock (input actually disabled, explanation
+text appears, unlock-and-rebuild fires a rebuild), build-state transitions (heat
+map dims during build, never undimmed-stale), and strategy-selector failure
+fallback. **Existing input validation gap fixed in passing**: GameAnalyzer's
+free-text `ddWager`/`fjWager` fields parse to NaN unguarded (GameAnalyzer.tsx:55)
+and the equity mini-chart reads them — same clamp+hint treatment as the new
+confidence slider.
+
 **Accessibility for new controls**: strategy segmented control = `role="radiogroup"`
 with arrow-key navigation, ≥44px touch targets, labels visible (not placeholder-only);
 locked knobs use `aria-disabled` + the inline explanation text (not `display:none`);
@@ -279,6 +329,64 @@ This plan leaves us: truthful wagering layer (equity + closed-form FJ), empirica
 calibrated DD priors, honest axes, shipped app. 12-month ideal adds: DD seeking +
 board control strategy, what-if replay and #8276 backtest (both unlocked by V(S) —
 platform infrastructure), full strategy oracle, mobile layout. V(S) is the bridge.
+
+## Architecture (target state)
+
+```
+  scripts/build-clue-stats.ts ──┐          jeopardy_dataset zip (gitignored)
+  scripts/build-games.ts ───────┼── scripts/lib/era.ts (shared)
+        │                       │
+        ▼                       ▼
+  app/public/games.json   app/public/clue-stats.json (priors + generatedAt)
+        │                       │
+        ▼                       ▼ (startup fetch, warn+fallback on 404)
+  ┌─────────────────────────── App.tsx ────────────────────────────┐
+  │  state: position, config (per-player ddStrategy), V-table cache │
+  │  persistent gameWorkerRef ◄── builds V-table ONCE, transfers    │
+  └───┬──────────────────┬──────────────────────┬──────────────────┘
+      ▼                  ▼                      ▼
+  YourGame tab       Explorer tab           All Games tab
+  GameAnalyzer       HeatMap (own worker,   ContributionGraph
+   ├ confidence       receives V-table)      (25 sims/game refined)
+   ├ equity chart     ├ axis pills A/B/C    YourNumber
+   └ P-3 bridge ────► ├ dash contours       GamesControls
+                      └ DD heat strip
+                            ▲
+  app/src/sim/: sim-engine.ts (simulateFromState, per-player strategy,
+  seeded rng, stochastic board control) ── value-function.ts (5D V(S))
+  ── equity dispatch (never inside ddWager's switch)
+```
+
+## Test coverage map (new codepaths → tests)
+
+```
+CODE PATHS                                          USER FLOWS
+[+] sim-engine.ts (E-0 refactor)                    [+] Equity mode
+  ├── [TEST] seeded determinism (same seed→same)      ├── [TEST] select Optimal → build → dim → ready
+  ├── [TEST] regression-lock: full-game snapshot      ├── [TEST] build failure → inline status + revert
+  │          identical pre/post refactor (CRITICAL)   ├── [TEST] knob lock/unlock + rebuild   [→UI]
+  ├── [TEST] partial board: 0 clues → FJ              └── [TEST] cancel mid-build             [→UI]
+  ├── [TEST] DD renormalization over open rows      [+] GameAnalyzer
+  └── [TEST] per-player strategy dispatch             ├── [TEST] NaN/negative wager clamp+hint
+      + 'equity' never enters ddWager (compile)       └── [TEST] confidence slider drives chart
+[+] value-function.ts (E-2)                         [+] Axis pills (P-1)
+  ├── [TEST] V monotone in your score                 └── [TEST] format()/unit per candidate
+  ├── [TEST] pre-FJ lock → V=1 (FJ off)                          (no "Coryat: 43%")
+  ├── [TEST] clamp out-of-range queries             [+] Journey bridge (P-3)
+  └── [TEST] build budget ≤5s measured                └── [TEST] submit → Explorer + pulse + link
+[+] equity (E-3/E-4)                                LLM integration: none — no eval suites
+  ├── [TEST] paper-replication ±5pp × 3 points
+  ├── [TEST] monotonicity $3.2K→$12.4K
+  ├── [TEST] production invariants (near-flat
+  │          optimum, lock preservation)
+  └── [TEST] FJ lock/crush/two-thirds cases (E-5)
+[+] build-clue-stats.ts (E-1)
+  ├── [TEST] golden rows (era normalization)
+  ├── [TEST] zero-DD abort; malformed-row counts
+  └── [TEST] prior sanity (row-1 ≤2% post-2001)
+COVERAGE TARGET: every branch above has a named test before implementation starts.
+2am-Friday test: the seeded full-game regression snapshot (first bullet).
+```
 
 ## Error & Rescue Registry
 
@@ -375,3 +483,13 @@ V-table skill bias and silent priors fallback; both fixed above).
 | 29 | Phase 2 | Corrected All Games baseline: refined pass is 10 sims/game (App.tsx:211), not 5; SE math restated | Mechanical | P1 | Review claim was computed from a wrong baseline | Ship wrong numbers |
 | 30 | Phase 2 | Confidence input: slider 50–95%, default 55%, adjacent to DD wager, drives mini-chart | Mechanical | P5 | Most personal item in the plan was least specified | Clamp-rule-only spec |
 | 31 | Phase 2 | A11y spec for new controls (radiogroup, 44px, aria-disabled locks, chart aria-label) | Mechanical | P1 | New interactive surfaces without a11y spec won't get it later | "A11y later" |
+| 32 | Phase 3 | E-0 rescoped as core refactor (simulateRound unexported + full-board-only); regression-lock snapshot test required | Mechanical | P5 | Leverage map overclaimed "reuse via wrapper" (conf 9, file-verified) | Wrapper fiction |
+| 33 | Phase 3 | Per-player DD strategy split named as work; equity dispatch before ddWager + never-guard | Mechanical | P1 | Global ddStrategy applies to any controller (sim-engine.ts:282); enum fall-through = silent min-bets (conf 8) | Silent default |
+| 34 | Phase 3 | P-0 gains .gitignore-first rule (data/, *.zip); E-1 gains unzip prerequisite | Mechanical | P6 | 56MB zip + 77MB TSV would enter history permanently; TSV not yet extracted (conf 9, measured) | git add . and pray |
+| 35 | Phase 3 | Partial-board DD placement = renormalized DD_ROW_WEIGHTS over open rows | Mechanical | P1 | Uniform draw would wash out the E-1 empirical prior (conf 6) | Unspecified |
+| 36 | Phase 3 | E-7 adds UI test infra (@testing-library/react + jsdom) + interaction tests | Mechanical | P1 | Zero UI test capability exists; hardest interactions were untested AND unnamed as untested (conf 8) | Manual-QA-only, unstated |
+| 37 | Phase 3 | V-table home: built once in persistent worker, transferred to consumers | Mechanical | P5 | Two independent workers exist (HeatMap's own + gameWorkerRef); double-build would break the 5s budget (conf 6) | Ambiguous "the worker" |
+| 38 | Phase 3 | Axis candidate A needs inverse-calibration curve; +½ day budget | Mechanical | P1 | Buzz-race win % has no closed-form inverse to buzzerSpeed (conf 6) | 1-day estimate stands |
+| 39 | Phase 3 | Equity bet grid floors at real $5 rule; heuristic presets keep documented simplification | Mechanical | P5 | minWager=maxClueValue would silently carry old inaccuracy into the validated layer (conf 5) | Inherit silently |
+| 40 | Phase 3 | Existing ddWager/fjWager free-text inputs get clamp+hint (NaN unguarded, chart consumes them) | Mechanical | P1 | GameAnalyzer.tsx:55 parseInt→NaN with no guard (conf 6) | New-inputs-only validation |
+| 41 | Phase 3 | E-1 tiebreaker claim replaced with honest schema statement (round∈{1,2,3}, no tiebreaker signal) | Mechanical | P5 | Claimed edge case is unidentifiable in the data (conf 5, measured) | Claim "handled" |
