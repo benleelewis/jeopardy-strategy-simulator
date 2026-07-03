@@ -1,7 +1,12 @@
 <!-- /autoplan restore point: ~/.gstack/projects/Jeopardy/master-autoplan-restore-20260703-095649.md -->
 # Plan: Make the Explorer Answer the Question — Accurate Wagering, Real Calibration, Honest Axes
 
-*v2 — revised 2026-07-03 during /autoplan Phase 1 (CEO review, premises accepted by Ben).
+**STATUS: APPROVED** — /autoplan final gate, 2026-07-03. Taste decisions: C1 runs
+parallel and informs (does not gate) Track E; YourNumber moves above GamesControls
+(P-4); default tab stays Your Game.
+
+*v4 — drafted and revised 2026-07-03 through /autoplan (CEO + Design + Eng review,
+premises accepted at gate D2, approved at gate D6).
 Two tracks: Product (ship + axes + de-fuzz) and Engine (equity wagering + calibration).*
 
 ## Product direction (Ben, 2026-07-03)
@@ -98,8 +103,14 @@ taste decision at the final gate — it touches the 8/10 view).
 
 **C1 — CHECKPOINT: Ben re-rates the Explorer** after P-1 + P-2 land on the deployed
 app. Records the residual complaint: semantics (fixed?), fuzziness (fixed?), or
-accuracy (Engine track's job). *Whether C1 hard-gates Track E or just informs it is a
-taste decision surfaced at the /autoplan final gate.*
+accuracy (Engine track's job). **Resolved at final gate (D3): C1 informs, does not
+gate — Track E runs in parallel from day one.**
+
+**P-4 All Games hierarchy fix (approved at final gate, D4).** Move YourNumber (the
+"You'd win N% of all games" headline + histogram) ABOVE the GamesControls slider
+stack on the All Games tab. Pure reorder — payoff first, knobs second; the graph
+itself is untouched. Default tab stays Your Game (D5 — narrative entry preserved;
+P-3's bridge covers explorers).
 
 ### Track E — Engine (equity wagering + real calibration)
 
@@ -493,3 +504,22 @@ V-table skill bias and silent priors fallback; both fixed above).
 | 39 | Phase 3 | Equity bet grid floors at real $5 rule; heuristic presets keep documented simplification | Mechanical | P5 | minWager=maxClueValue would silently carry old inaccuracy into the validated layer (conf 5) | Inherit silently |
 | 40 | Phase 3 | Existing ddWager/fjWager free-text inputs get clamp+hint (NaN unguarded, chart consumes them) | Mechanical | P1 | GameAnalyzer.tsx:55 parseInt→NaN with no guard (conf 6) | New-inputs-only validation |
 | 41 | Phase 3 | E-1 tiebreaker claim replaced with honest schema statement (round∈{1,2,3}, no tiebreaker signal) | Mechanical | P5 | Claimed edge case is unidentifiable in the data (conf 5, measured) | Claim "handled" |
+| 42 | Final gate | C1 informs, does not gate Track E (D3, Ben) | Taste → resolved | — | Ben's paper + stated interest; parallel tracks | Hard gate |
+| 43 | Final gate | YourNumber above GamesControls on All Games (P-4) (D4, Ben) | Taste → resolved | — | Headline-before-knobs hierarchy; graph untouched | Leave tab alone |
+| 44 | Final gate | Default tab stays Your Game (D5, Ben) | Taste → resolved | — | Narrative ladder preserved; P-3 bridge covers explorers | Lead with All Games / Explorer |
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 1 | CLEAR (PLAN via /autoplan) | 10 proposals, 6 accepted, 3 deferred; spec-review 9/10 |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — (CLI not installed) | voices ran subagent-only, all 3 phases |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR (PLAN via /autoplan) | 10 issues (3 P1), 0 critical gaps remaining |
+| Design Review | `/plan-design-review` | UI/UX gaps | 1 | CLEAR (PLAN via /autoplan) | score 4/10 → 8/10, 10 decisions |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | SKIPPED | no developer-facing scope |
+
+- **VERDICT:** CEO + ENG + DESIGN CLEARED — ready to implement. Plan APPROVED at
+  /autoplan final gate 2026-07-03 (D6); 44 decisions logged, 3 taste calls resolved
+  by Ben, 0 user challenges.
+
+NO UNRESOLVED DECISIONS
