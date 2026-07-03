@@ -1,6 +1,8 @@
+<!-- /autoplan restore point: ~/.gstack/projects/Jeopardy/master-autoplan-restore-20260703-095649.md -->
 # Plan: Make the Explorer Answer the Question — Accurate Wagering, Real Calibration, Honest Axes
 
-*Drafted 2026-07-03 from FABLE_LIFT_ANALYSIS.md (#1 + #2), TASKS.md, and Ben's product direction (below). Target: app/src/sim/* + Explorer view*
+*v2 — revised 2026-07-03 during /autoplan Phase 1 (CEO review, premises accepted by Ben).
+Two tracks: Product (ship + axes + de-fuzz) and Engine (equity wagering + calibration).*
 
 ## Product direction (Ben, 2026-07-03)
 
@@ -12,209 +14,287 @@
 > reflect exactly what I want."
 
 Implications this plan adopts:
-1. **The All Games contribution graph is the product's spine.** Don't destabilize
-   it; improvements should feed it (better per-game win-rate accuracy recolors it).
-2. **The Explorer heat map must earn its place.** Its two failures are named:
-   inaccurate computations (fixed by W1–W6 below) and axes that don't mean what
-   Ben wants (fixed by W0 below). Fuzziness is both statistical (Monte Carlo noise)
-   and semantic (axes that don't map to actionable questions).
-3. **Usability and interaction design beat model complexity.** Engine work below is
-   justified only insofar as it makes the visualizations truthful and interesting.
-   Any work item that adds complexity without changing what the user sees or can do
-   gets cut or deferred.
+1. **The All Games contribution graph is the product's spine.** Don't destabilize it.
+2. **The Explorer must earn its place** — accuracy (Engine track) and axis semantics
+   (Product track) are both named failures; their relative weight is unknown, so a
+   re-rating checkpoint sits between them.
+3. **Usability and interaction design beat model complexity.** Engine work is justified
+   only insofar as it changes what the user sees or can do.
+
+## Accepted premises (gate passed 2026-07-03)
+
+P1 All-Games graph is the spine. P2 Explorer fails on accuracy AND axis semantics,
+proportions unknown → checkpoint C1. P3 Equity wagering is right IF board control gets
+a minimal stochastic model. P4 Clue-level priors are real; wager-vs-score is
+unsupportable from the data and is cut. P5 Ben's paper validates only a
+paper-replication config; production config gets separate invariants. P6 No LLM,
+static data, closed-form sim.
 
 ## Problem
 
 The simulator's wagering layer is a placeholder. `ddWager()` (sim-engine.ts:187-207)
-picks from four fixed heuristics (25% / 75% / all-in / flat fraction), and Final
-Jeopardy (sim-engine.ts:365-410) uses a one-rule strategy (leader covers 2× second,
-everyone else all-in). Tesauro 2012's headline finding — quoted in BRAINSTORM.md — is
-that DD wagering and DD seeking dominate win rate against strong opponents more than
-any other factor. The heat map cannot show that effect today because the layer
-underneath it is fake. Separately, the engine's DD placement prior
-(`DD_ROW_WEIGHTS = [0.02, 0.04, 0.15, 0.31, 0.48]`) and difficulty curves are
-folklore-calibrated, while a 529,939-row clue-level dataset
-(`combined_season1-41.tsv`) sits unparsed in the repo root.
+picks from four fixed heuristics, and Final Jeopardy (sim-engine.ts:365-410) uses a
+one-rule strategy. The engine's DD placement prior (`DD_ROW_WEIGHTS`) is folklore
+while a 529,939-row clue-level dataset sits unparsed. The Explorer heat map is fuzzy
+(Monte Carlo noise) and its axes conflate buzz *attempt* rate with buzz *success*
+rate (design doc Open Question #1, 2026-03-21 — never resolved). The app has never
+been deployed and `app/` has never been committed to git.
 
-## Goal
-
-1. Replace heuristic DD and FJ wagering with a Watson-style equity calculation:
-   `Equity(bet) = p_correct × V(S_win) + (1 − p_correct) × V(S_lose)`, where V is a
-   game-state value function estimating P(win | scores, clues remaining).
-2. Validate the implementation against the known-answer table from Ben's IYSE 6644
-   paper (episode #8276 state: scores [19400, 6400, 17200], last DD, 13 clues
-   remaining, 55% confidence): $3,200 → ~36%, $5,000 → ~45%, $12,400 → ~55% equity.
-3. Parse the clue-level dataset into empirical priors: DD placement probability by
-   row × round × era, real DD wager distributions, and difficulty curves — and feed
-   them into the engine in place of hardcoded constants.
+Honest scope statement: this plan can show the **DD-wagering effect**. It cannot show
+Tesauro's headline **DD-seeking effect** (square-selection strategy is out of scope);
+board control gets a minimal stochastic model only so V(S) isn't biased.
 
 ## Work Items
 
-### W0 — Explorer axes redesign (design decision, gates the rest of the Explorer work)
+### Track P — Product (ships first, cheap, directly targets the 5/10)
 
-The current axes are Knowledge (b×p composite) × Buzzer Speed (relative weight).
-Ben's verdict: they don't reflect what he wants to know. Before pouring accuracy
-into the wrong frame, decide what question the Explorer answers. Candidate framings
-to evaluate (design review should pressure-test; final call is Ben's):
+**P-0 Baseline commit + deploy.** Commit the entire current `app/` + `scripts/` +
+`data/` state to git (it is currently untracked — no rollback point exists). Deploy
+to Vercel (TASKS.md Phase 0 checkbox). Every later item lands as a diff against a
+shipped baseline.
 
-- **A. "How good am I?" axes (interpretable units)**: X = % of clues you'd answer
-  correctly if you buzzed (precision), Y = % of buzzer races you win. Every real
-  contestant and famous player maps onto these from data; positions stop being
-  abstract weights.
-- **B. "What should I do?" axes (actionable)**: X = knowledge (study hours move
-  you), Y = buzzer skill (practice moves you) — the current frame, but recalibrated
-  so units are honest and the marginal-returns panel says "10 more study-hours ≈
-  +2% win rate."
-- **C. Coryat-anchored axes**: X = expected Coryat score (real, checkable against
-  a contestant's actual games), Y = buzz attempt rate. Anchors the whole map to a
-  number Jeopardy people already know.
+**P-1 Axis semantics prototype (3 candidates, then Ben picks).** Build all three axis
+framings behind the existing `dimensions.ts` registry (est. ~1 day CC total, cheap
+because the registry already generalizes):
+- **A. Interpretable units**: X = precision (% correct when you buzz), Y = buzz-race
+  win % vs the field. Every famous player maps from data; fixes the attempt-vs-success
+  conflation directly.
+- **B. Actionable units**: knowledge × buzzer as today, but recalibrated so the
+  marginal-returns panel speaks in "+10 study-hours ≈ +2pp win rate" terms.
+- **C. Coryat-anchored**: X = expected Coryat, Y = buzz attempt rate. Anchors to a
+  number Jeopardy people already know; directly checkable against real games.
+Ben compares all three live (deployed) and picks one. Famous-player positions, StatsPanel
+copy, GameAnalyzer estimate→position mapping then update for the winner.
 
-De-fuzzing (statistical): raise refined-pass sim counts and/or grid smoothing where
-the color field is visibly noisy; contour lines should read as confident, not
-smudged. This is bounded, measurable work (existing adaptive-resolution pipeline).
+**P-2 De-fuzzing.** Raise refined-pass grid sim counts where the color field is
+visibly noisy; render contour confidence (line opacity ∝ local sample size); document
+before/after variance. Bounded, measurable, uses the existing adaptive-resolution
+pipeline.
 
-Deliverable: one chosen axis semantics, famous-player positions recomputed for it,
-StatsPanel/marginal-returns copy rewritten in its units, and the estimate→position
-mapping in GameAnalyzer updated to match.
+**C1 — CHECKPOINT: Ben re-rates the Explorer** after P-1 + P-2 land on the deployed
+app. Records the residual complaint: semantics (fixed?), fuzziness (fixed?), or
+accuracy (Engine track's job). *Whether C1 hard-gates Track E or just informs it is a
+taste decision surfaced at the /autoplan final gate.*
 
-### W1 — Game-state value function V(S)
+### Track E — Engine (equity wagering + real calibration)
 
-New module `app/src/sim/value-function.ts`.
+**E-0 Engine plumbing (prerequisite, was unbudgeted in v1).**
+- `simulateFromState(state)`: enter a game at an arbitrary board state (scores,
+  remaining clue values, remaining DD count, round). Needed by V-table rollouts and
+  the validation harness. Boundary: 0 clues remaining → straight to FJ.
+- Seeded RNG: thread an optional `rng: () => number` through the five call sites that
+  use `Math.random()` (default unchanged). Determinism test: same seed → same result.
+- Minimal stochastic board control: replace deterministic leader-takes-DD
+  (sim-engine.ts:279) with score-weighted random control (configurable; default
+  preserves current behavior until validated). Without this, V(S) encodes "trailing
+  players never get DDs" and equity numbers inherit the bias.
 
-- **Design**: V(scoreYou, scoreOpp1, scoreOpp2, cluesRemaining) ≈ P(win). Tesauro
-  never published Watson's neural-net GSE, so we substitute a **precomputed rollout
-  table**: dimensionality-reduce to (yourShare = S_you / totalOnBoard+scores,
-  leadRatio, cluesRemaining bucket), populate by Monte Carlo rollout using the
-  existing `simulateRound`/`simulateFinalJeopardy` machinery, ~50–100 rollouts per
-  cell, Gaussian-smoothed (reuse `gaussianBlur2D` from math-utils.ts).
-- **Interpolation**: trilinear between cells at query time. O(1) per lookup — this
-  is the hot path inside the Monte Carlo inner loop; a rollout per wager decision
-  would be ~1000× too slow for the heat map.
-- Table is built lazily per opponent model and cached in the worker (same pattern
-  as the persistent games-data cache).
+**E-1 Clue-level dataset parser** (`scripts/build-clue-stats.ts`, mirrors
+build-games.ts; shared era logic extracted to `scripts/lib/era.ts`).
+- Schema (verified): round, clue_value, daily_double_value, category, comments,
+  answer, question, air_date, notes. DD rows keep face value; wager in
+  daily_double_value.
+- Derive: P(DD | row, round) with era normalization (values doubled 2001-11-26);
+  DD wager distribution **as fraction of round max only** (wager-vs-score cut —
+  no score-at-DD-time exists in the data); board-completeness stats (exclude
+  incomplete boards, same philosophy as build-games.ts).
+- Edge cases handled explicitly: malformed rows (skip + count), tiebreaker rounds,
+  missing air_date (excluded from era-sensitive stats), zero-value rows.
+- Output `app/public/clue-stats.json` (aggregated priors only) with `generatedAt` +
+  source row counts embedded for debuggability.
+- Acceptance: DD count ≈ 3 × ~8.6K games ≈ 26K; fitted prior sanity vs folklore
+  (bottom-3-rows favored; row-1 DDs ≤ ~2% post-2001) — divergence is a surfaced
+  finding, not a silent ship.
 
-### W2 — Equity-based DD wagering
+**E-2 Game-state value function V(S)** (`app/src/sim/value-function.ts`).
+- Precomputed rollout table over a 5D coarse state: (your-skill bucket [4×4 over
+  knowledge×buzzer], your-share, leader-ratio, **third-player ratio** [lock/crush/
+  three-way cases differ sharply — 2D score projection provably loses them],
+  clues-remaining bucket). Populated by `simulateFromState` rollouts, smoothed with
+  `gaussianBlur2D` per 2D slice, multilinear interpolation at query time (O(1) —
+  the hot path).
+- Your-skill bucketing is the fix for the v1 critical defect: the heat map sweeps
+  YOUR skill, so a table baked for one fixed "you" is wrong everywhere else.
+- Budget (must hold, measured): table build ≤ ~5s per opponent model in the worker
+  with progress messages, ≤ ~2MB Float32Array, cached per (opponentModel) with skill
+  as table dims; never rebuilt on drag.
+- Invariants tested: V monotone ↑ in your score; V→1 for pre-FJ lock with FJ off;
+  V clamped [0,1]; out-of-range queries clamp to table bounds.
 
-Extend `ddWager()` with a new strategy `'optimal'`.
+**E-3 Equity DD wagering.** New SimConfig strategy **`'equity'`** (UI label
+"Optimal (equity)"; named for what it computes, not an overclaim). At a DD:
+argmax over bet grid (minWager → all-in, ~$500 steps ≤ 40 evaluations) of
+`Equity(bet) = p × V(S₊) + (1−p) × V(S₋)`, p = difficulty-adjusted precision
+(same machinery as regular DD resolution). Existing presets untouched; `'equity'`
+is additive; default config unchanged (rollback = revert commit).
 
-- At a DD, evaluate Equity(bet) over a coarse bet grid (min-wager → true DD in
-  ~$500 steps, ≤ ~40 evaluations), pick argmax.
-- p_correct = player's difficulty-adjusted precision on that clue (existing
-  `p × difficultyMultiplier` machinery), consistent with how regular DD resolution
-  already computes it.
-- Keep existing presets (`conservative`/`aggressive`/`truedd` and the continuous
-  `ddWagerFraction`) untouched — UI selector keeps working; `'optimal'` is additive.
-- SimConfig gains `ddStrategy: 'optimal'` as a new enum member.
+**E-4 Dual-config validation harness** (`app/src/sim/equity-validation.test.ts`).
+- **Paper-replication config** (symmetric players, ρ=0, no difficulty scaling —
+  matches the IYSE 6644 model): scores [19400, 6400, 17200], last DD, 13 clues
+  remaining, 55% confidence → equity at $3,200/$5,000/$12,400 reproduces
+  36%/45%/55% within ±5pp, seeded. Monotonicity: equity non-decreasing across
+  that wager range.
+- **Production-config invariants** (Tesauro opponents, correlations, difficulty
+  scaling — where paper numbers do NOT apply): monotonicity in confidence;
+  equity-vs-wager curve is near-flat at the optimum (Tesauro's risk-mitigation
+  property: −$2,600 from optimum costs ≲0.5pp); lock-preservation (never wager
+  into a loss-from-win state late).
+- Failure diagnostic prints the full equity curve, not just the assertion.
 
-### W3 — Equity-based FJ wagering
+**E-5 Final Jeopardy: closed-form baseline + equity comparison.** Encode the known
+closed-form FJ strategy (lock / crush / two-thirds cases per standard wagering
+theory — The Final Wager conventions) as `fjStrategy: 'standard'` replacing the
+current one-rule block for correctness; add `'equity'` FJ (grid search over wagers
+using V and correlated FJ accuracy ρ≈0.3) and **report the measured gap** between
+closed-form and equity as a test output. Opponents keep using 'standard' (models
+real contestants). Lock-game handling preserved and tested.
 
-Replace the single-rule FJ block with a strategy that evaluates equity over the
-wager grid for each player, using FJ accuracy (correlated ρ≈0.3 as today) and the
-opponents' plausible wager distributions.
+**E-6 Empirical priors into the engine.** `DD_ROW_WEIGHTS` becomes the fallback;
+SimConfig accepts `ddRowWeights` loaded from clue-stats.json at startup. Missing/
+malformed file → console.warn + fallback (visible, never silent). Difficulty-curve
+comparison vs the tsx-derived `difficultyMultiplier`: recalibrate only if data
+clearly contradicts; document either way in BRAINSTORM.md.
 
-- Keep the classic score-position rule as the default (`fjStrategy: 'standard'`),
-  add `'optimal'`. Opponents continue using the standard rule (models real
-  contestants; Tesauro: champion wagering is only "more coherent," not equity-perfect).
-- Lock-game handling must remain: leader with > 2× second bets for the lock.
-
-### W4 — Known-answer validation harness
-
-New test file `app/src/sim/equity-validation.test.ts`.
-
-- Encode Ben's paper scenario: scores [19400, 6400, 17200], last DD on the board,
-  13 clues remaining, DD confidence 55%.
-- Assert equity at wagers $3,200 / $5,000 / $12,400 reproduces 36% / 45% / 55%
-  within ±5 percentage points (Monte Carlo tolerance; paper used 10M runs, we run
-  fewer with a fixed seed).
-- Add a seeded RNG utility for deterministic tests (current engine uses raw
-  `Math.random()`; inject an optional RNG parameter, default unchanged).
-- Assert the paper's qualitative finding: equity is monotonically non-decreasing in
-  wager between $3,200 and $12,400 at 55% confidence.
-- All 30 existing tests stay green.
-
-### W5 — Clue-level dataset parser
-
-New script `scripts/build-clue-stats.ts` (mirrors existing `scripts/build-games.ts`).
-
-- Input: `combined_season1-41.tsv` (529,939 rows; schema verified: round,
-  clue_value, daily_double_value, category, comments, answer, question, air_date,
-  notes). DD rows keep face value in clue_value with wager in daily_double_value.
-- Derive:
-  - **DD placement prior**: P(DD | row, round), where row is inferred from
-    clue_value with **era normalization** (values doubled 2001-11-26; pre-doubling
-    seasons use $100–500/$200–1000 scales) — verified present in the data.
-  - **Real DD wager distribution**: wager as fraction of round max and, joined
-    against scoring data where possible, as fraction of contestant score.
-  - **Round structure sanity stats**: clues per game per round (detect incomplete
-    boards and exclude them, same filter philosophy as build-games.ts).
-- Edge cases handled explicitly: missing/zero clue_value rows, tiebreaker rounds
-  (round 3+), missing air_date, malformed rows (log + skip, report counts).
-- Output: `app/public/clue-stats.json` (small — aggregated priors only, not rows).
-
-### W6 — Feed empirical priors into the engine
-
-- `DD_ROW_WEIGHTS` becomes the fallback default; engine accepts an optional
-  `ddRowWeights` on SimConfig, loaded from clue-stats.json at app startup.
-- Acceptance check: fitted prior should qualitatively match the folklore
-  ("bottom 3 rows heavily favored"); if it diverges wildly, that's a finding to
-  surface, not silently ship.
-- Difficulty curves: compare fitted DD-row distribution and wager norms against the
-  tsx-derived `difficultyMultiplier`; recalibrate constants only if the data clearly
-  contradicts them (document either way in BRAINSTORM.md).
-
-### W7 — UI integration (usability-first, per product direction)
-
-- DD strategy selector gains "Optimal (equity)" option; FJ toggle gains strategy
-  choice only if trivial — otherwise FJ optimal ships engine-side behind config.
-- Loading state: first heat-map pass with `'optimal'` must show the existing
-  progress UI while the V-table builds (reuse worker progress messages).
-- **All Games graph inherits the accuracy win for free**: per-game win rates
-  recompute through the same engine, so the 8/10 view gets more truthful colors
-  with zero layout change. Verify recolor performance is unchanged.
-- No new views or tabs. Explorer layout changes only as required by W0's axis
-  redesign (axis labels, StatsPanel copy, famous-player markers).
+**E-7 UI integration + approved delight items** (all in blast radius, ≤1 day CC each,
+approved during cherry-pick ceremony):
+- DD strategy selector gains "Optimal (equity)"; first use triggers V-table build with
+  the existing worker progress UI; selection reverts gracefully on build failure
+  (toast + fallback to previous strategy — never silent wrong numbers).
+- **Equity-curve mini-chart**: at any DD (GameDetail / GameAnalyzer), plot equity vs
+  wager — the interactive version of Ben's paper's figure.
+- **DD wager tooltip** in GameDetail: "You bet $5,000. Optimal: $12,400 (+10pp equity)."
+- **Confidence input** on GameAnalyzer DD analysis (the paper's confidence×wager grid,
+  personalized).
+- **DD-placement heat strip** from E-1 priors ("where DDs actually live"), rendered
+  from clue-stats.json.
+- All Games recolor: raise refined pass 5 → ~25 sims/game (measured; per-square SE
+  improves ~±20pp → ~±10pp — aggregate patterns and Your Number benefit most;
+  per-square noise remains and is stated honestly, not claimed away).
 
 ## Sequencing
 
-W0 (axis decision) → W5 → W1 → W2 → W4 → W3 → W6 → W7. (W0 first because axis
-semantics determine what the calibration must produce and what "accurate" means
-on-screen; W5 before W1 so empirical p_DD(row) exists before the equity model
-consumes it; W4 gates W3 — validate DD equity before touching FJ.)
+```
+Track P: P-0 → P-1 ┬→ C1 (re-rate) ──────────────┐
+                   └ P-2 ┘                        │ informs (or gates — final-gate
+Track E: E-1 → E-0 → E-2 → E-3 → E-4 → E-5 → E-6 → E-7
+         (E-1 first: empirical p_DD feeds E-2 rollouts; E-4 gates E-5:
+          validate DD equity before touching FJ)
+```
+Tracks run in parallel; the axis decision does NOT gate engine work (the v1 claim
+that it did was wrong — equity math is axis-independent).
 
 ## NOT in scope
 
-- DD *seeking* / board-control square-selection strategy (Tesauro's
-  p_DD + 0.1×p_RC selection policy) — the engine has no square-selection model at
-  all today (board control goes to score leader); adding one is its own project.
-- Multi-game/tournament wagering, endgame ADP buzz strategy.
-- Category-level knowledge modeling from the clue text.
-- J-Archive live fetch (separate task, TASKS.md Phase 1F).
-- Any LLM integration (CEO-review decision: closed-form simulator, static data).
+- DD *seeking* / square-selection strategy (Tesauro's p_DD + 0.1×p_RC policy) — own
+  project; this plan only de-biases board control enough to keep V(S) honest.
+- Multi-game/tournament wagering; endgame ADP buzz thresholds.
+- Category-level knowledge modeling from clue text.
+- J-Archive live fetch (TASKS.md Phase 1F, separate).
+- Optimal-vs-actual delta mode on the All Games graph (deferred: spine-risk), share
+  card for Your Number, full strategy-oracle ranking (deferred to TODOS).
+- Mobile 3-column Explorer layout rework (design doc Open Question #5 — separate).
+- Any LLM integration (locked decision).
 
-## Risks
+## What already exists (leverage map)
 
-- **V(S) fidelity**: a coarse rollout table may be too smooth to reproduce the
-  paper's numbers. Mitigation: the validation harness (W4) is the gate; if ±5pp
-  fails, increase table resolution/rollouts before touching FJ.
-- **Perf regression**: equity argmax adds ~40 V-lookups per DD × 3 DDs per game.
-  With O(1) lookups this is negligible, but the V-table build itself (~thousands of
-  rollouts) must be a one-time-per-model cost, cached, off the drag path.
-- **Era normalization errors** in W5 would corrupt the DD prior. Mitigation:
-  validate row inference against known constraints (5 rows per round, DD never in
-  row 1 more than ~2% of the time post-2001).
-- **Test brittleness**: Monte Carlo assertions need seeds + tolerances, not exact
-  equality.
+| Sub-problem | Existing code | Reused? |
+|---|---|---|
+| Game simulation for rollouts | `simulateRound`, `simulateFinalJeopardy` | Yes — E-2 rolls out through them via `simulateFromState` |
+| Grid smoothing | `gaussianBlur2D` (math-utils.ts) | Yes — per-slice table smoothing |
+| TSV parsing + filtering | `scripts/build-games.ts` | Yes — E-1 mirrors it; era logic extracted shared |
+| Axis abstraction | `dimensions.ts` DimensionConfig registry | Yes — P-1 adds candidates, no new architecture |
+| Worker caching | persistent worker + loadGames pattern | Yes — V-table cached the same way |
+| Opponent calibration | `calibrate.ts` Coryat heuristic | Yes — P-1 candidate C builds on it |
+| Progress UI + crash fallback | sim-worker progress + main-thread fallback | Yes — V-table build reuses both |
+
+## Dream state delta
+
+This plan leaves us: truthful wagering layer (equity + closed-form FJ), empirically
+calibrated DD priors, honest axes, shipped app. 12-month ideal adds: DD seeking +
+board control strategy, what-if replay and #8276 backtest (both unlocked by V(S) —
+platform infrastructure), full strategy oracle, mobile layout. V(S) is the bridge.
+
+## Error & Rescue Registry
+
+| Codepath | What can go wrong | Handling | User sees |
+|---|---|---|---|
+| build-clue-stats.ts parse | Malformed row | Skip + count, report at end | Build log: "N rows skipped" |
+| build-clue-stats.ts parse | Zero DD rows parsed | Abort with error (never emit empty priors) | Build fails loudly |
+| build-clue-stats.ts era | Missing air_date | Exclude from era-sensitive stats, count | Build log |
+| App startup priors load | clue-stats.json 404/malformed | console.warn + fallback to DD_ROW_WEIGHTS | Nothing broken; devtools warn |
+| V-table build | Worker crash / OOM | Existing crash handler → revert to previous strategy preset + toast | "Optimal unavailable — using Aggressive" |
+| V-table build | User changes settings mid-build | Cancel in-flight (existing pattern), restart | Progress restarts |
+| Equity argmax | score < minWager | Clamp bet grid to [minWager, max(score, minWager)] | Correct min wager |
+| V query | Out-of-range state (huge/negative scores) | Clamp to table bounds | Sane equity |
+| Equity validation | Tolerance failure | Print full equity curve diagnostic | CI failure with curve |
+| GameAnalyzer confidence | Input <0 / >1 / NaN | Clamp + inline hint | Hint text |
+| FJ closed-form | Ties at all positions | Explicit tie rules (co-champion = 0.5 win) | Consistent stats |
+
+## Failure Modes Registry
+
+| Codepath | Failure mode | Rescued? | Test? | User sees | Logged |
+|---|---|---|---|---|---|
+| Priors load | Missing file | Y (fallback) | Y | Nothing (defaults) | console.warn |
+| V-table build | Crash | Y (preset fallback) | Y (simulated crash) | Toast | console.error |
+| V-table build | Silent bias (board control) | Y (E-0 stochastic model) | Y (invariants) | Truthful map | build report |
+| Equity vs paper | Model mismatch | Y (dual-config) | Y (E-4) | — | test output |
+| Parser | Era misclassification | Y (rule table + bounds check) | Y (golden rows) | — | build report |
+| All Games recolor | Noise swamps signal | Partially (25 sims/game) | Y (SE measured) | Honest per-square noise | documented |
+
+No row is Silent+Unrescued+Untested → no CRITICAL GAP remaining (v1 had two:
+V-table skill bias and silent priors fallback; both fixed above).
 
 ## Acceptance
 
-1. `npm test` green: 30 existing + new W4 harness + W5 parser unit tests.
-2. Equity table reproduces Ben's paper within ±5pp at all three known points.
-3. Heat map with DD strategy "Optimal" visibly differs from "Aggressive" (the
-   Tesauro effect becomes showable), with no interaction-latency regression.
-4. `clue-stats.json` ships with documented row counts: total parsed, excluded,
-   DD count (~3 per game × ~8.6K games ≈ 26K DDs expected).
-5. **Explorer answers Ben's question**: axes in units he chose (W0), color field
-   reads confident (not fuzzy), marginal-returns panel speaks those units. Target:
-   Ben re-rates the Explorer ≥ 7/10.
-6. All Games graph unchanged in feel and performance, recolored by the more
-   accurate engine.
+1. `npm test` green: 30 existing + E-0 determinism + E-2 invariants + E-4 dual-config
+   + E-1 parser tests.
+2. Paper-replication config reproduces Ben's table within ±5pp at all three points;
+   production config passes its invariant suite.
+3. Heat map with "Optimal (equity)" visibly differs from "Aggressive" — labeled as
+   the **DD-wagering effect** (not DD-seeking), no interaction-latency regression,
+   V-table build ≤ ~5s with progress.
+4. clue-stats.json ships with row counts (≈26K DDs expected) and generatedAt stamp.
+5. **C1 checkpoint recorded**: Ben re-rates the Explorer after P-1+P-2 on the deployed
+   app; target ≥ 7/10, residual complaint captured.
+6. All Games graph unchanged in feel; refined pass 25 sims/game measured for perf;
+   noise reduction stated with real numbers.
+7. App deployed to Vercel with baseline committed before any engine diff (P-0).
+
+## Risks
+
+- **V(S) fidelity**: 5D coarse table may still miss structure. Gate: E-4 invariants +
+  paper replication; if ±5pp fails, raise resolution/rollouts *only under the
+  paper-replication config* (raising them can't fix model mismatch — that's what the
+  dual-config split is for).
+- **Perf**: table build budget ≤5s/model, measured; equity lookups O(1); if budget
+  fails, shrink state dims before shrinking rollouts (smoothness beats variance here).
+- **Era normalization**: validated against known constraints (row-1 DD ≤ ~2% post-2001).
+- **Axis decision stalls**: C1 needs Ben's live comparison; deployed prototypes (P-1)
+  make it a 10-minute decision, not a design debate.
+- **Test brittleness**: every Monte Carlo assertion is seeded + tolerance-based.
+
+<!-- AUTONOMOUS DECISION LOG -->
+## Decision Audit Trail
+
+| # | Phase | Decision | Classification | Principle | Rationale | Rejected |
+|---|---|---|---|---|---|---|
+| 1 | Intake | Plan file = fresh draft from FABLE_LIFT + TASKS | User choice | — | Ben picked option C at D1 | Review FABLE_LIFT directly; TASKS.md |
+| 2 | Intake | Fold Ben's product direction into plan as first-class section | Mechanical | P1 | Direction arrived mid-draft; axes gap wasn't covered | Ignore until review |
+| 3 | Phase 0 | UI scope YES / DX scope NO | Mechanical | — | Explorer/axes/panels = UI; consumer app, no dev-facing surface | — |
+| 4 | Phase 0.5 | Codex unavailable → [subagent-only] voices | Mechanical | — | binary not found | — |
+| 5 | Phase 1 | cross_project_learnings = true | Mechanical | P6 | Local-only, solo dev, recommended default | Keep project-scoped |
+| 6 | Phase 1 0C-bis | Approach B (two-track revised) over A (as-drafted) / C (minimal) | Mechanical (not close) | P1, P5 | A contained 2 critical defects (V skill-bias, wrong validation target); B completeness 10/10 | A (6/10), C (3/10) |
+| 7 | Phase 1 | Adopt voice finding 1: dual-config validation (paper-replication + production invariants) | Mechanical | P1 | Paper's model ≠ production model; single-config gate chases wrong target | Single ±5pp gate |
+| 8 | Phase 1 | Adopt voice finding 2: skill-bucketed V-table dims | Mechanical | P1, P5 | Heat map sweeps YOUR skill; fixed-you table wrong everywhere else | Per-cell builds (perf-fatal); skill-agnostic V |
+| 9 | Phase 1 | Adopt voice finding 3: stochastic board control (E-0) + honest claim language | Mechanical | P1 | Deterministic leader-control biases V; acceptance 3 overclaimed "Tesauro effect" | Ship biased V with caveat |
+| 10 | Phase 1 | Adopt voice finding 4+: All Games refined pass 5→25 sims/game, honest noise statement | Mechanical | P1, P5 | 5 sims/game = ±20pp SE; claimed benefit was invisible | Keep claim as-was |
+| 11 | Phase 1 | Adopt voice finding 5: E-0 plumbing item (simulateFromState + seeded RNG) | Mechanical | P1 | Unbudgeted prerequisite for E-2/E-4 | Pretend it's a utility |
+| 12 | Phase 1 | Adopt voice finding 6: W0 does NOT gate engine track; prototype all 3 axis candidates | Mechanical | P3, P6 | Dependency was fake; one-shot axis pick was untestable | Sequential W0-first |
+| 13 | Phase 1 | Adopt voice finding 7: closed-form FJ baseline + equity gap report; cut wager-vs-score | Mechanical | P4, P5 | FJ theory is solved (lock/crush/two-thirds); data lacks score-at-DD | Pure MC search; keep unsupportable deliverable |
+| 14 | Phase 1 | Adopt voice finding 8: third-player ratio as 4th state dim | Mechanical | P1 | Lock/crush/three-way differ at identical 2D projections | 3D projection + hope |
+| 15 | Phase 1 | Adopt voice finding 9: P-0 deploy-first + baseline commit | Mechanical | P6 | app/ untracked = no rollback point; ship-first aligns with Ben's direction | Deploy later |
+| 16 | Phase 1 | C1 re-rate checkpoint added; whether it HARD-GATES Track E → **TASTE DECISION (final gate)** | Taste | P2 vs P6 | Both voices favor gating; Ben's paper + explicit interest favor unconditional | — |
+| 17 | Phase 1 0D | Approve 5 cherry-picks (equity curve chart, DD tooltip, confidence input, contour confidence, DD heat strip) | Mechanical | P2 | All in blast radius, <1d CC each, feed Ben's stated taste | — |
+| 18 | Phase 1 0D | Defer 3 (All-Games delta mode, share card, strategy oracle) | Mechanical | P2, P3 | Spine-risk / outside blast radius | Build now |
+| 19 | Phase 1 S5 | Enum named `'equity'`, UI label "Optimal (equity)" | Mechanical | P5 | Name what it computes; 'optimal' overclaims in code | `'optimal'` enum |
+| 20 | Phase 1 S5 | Shared `scripts/lib/era.ts` between both build scripts | Mechanical | P4 | Era logic would otherwise duplicate | Copy-paste |
