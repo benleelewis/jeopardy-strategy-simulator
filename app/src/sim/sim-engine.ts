@@ -15,7 +15,19 @@
  * (a drop-in replacement for Math.random, e.g. `mulberry32(seed)` below).
  * Omitting it preserves the original Math.random behavior exactly — this
  * threading is additive-only, never a behavior change for existing callers.
+ *
+ * E-3 note: `simulateRound`'s DD branch imports `equityWager` from
+ * `./value-function`, which itself imports `simulateFromState` etc. back
+ * from this file (value-function.ts rolls out games through this engine to
+ * build V(S)). This is a deliberate circular ES module import — safe here
+ * because both sides only reference the other's exports from inside
+ * function bodies (never at module-evaluation time), which is the standard
+ * safe pattern for circular imports. Kept minimal on purpose: this file
+ * imports exactly one function (`equityWager`) plus one type (`ValueTable`,
+ * `import type` — erased at compile time, zero runtime footprint).
  */
+
+import { equityWager, type ValueTable } from './value-function';
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -26,7 +38,18 @@ export interface Player {
   fjAccuracy: number;  // Final Jeopardy accuracy [0,1]
 }
 
-export type DDStrategy = 'off' | 'conservative' | 'aggressive' | 'truedd';
+export type DDStrategy = 'off' | 'conservative' | 'aggressive' | 'truedd' | 'equity';
+
+/**
+ * `DDStrategy` minus `'equity'` — `ddWager`'s parameter type (E-3). Typing
+ * `ddWager` to exclude `'equity'` (rather than adding an `'equity'` case
+ * that would just re-throw) means the compiler itself enforces "equity
+ * dispatch happens BEFORE `ddWager`": a caller holding a plain `DDStrategy`
+ * cannot pass it to `ddWager` without first narrowing away `'equity'` (e.g.
+ * `strategy === 'equity' ? ... : ddWager(strategy, ...)`, where the `else`
+ * branch narrows automatically). See `simulateRound`'s DD branch.
+ */
+export type NonEquityDDStrategy = Exclude<DDStrategy, 'equity'>;
 
 /**
  * Who controls the board when a Daily Double is hit.
@@ -50,7 +73,12 @@ export interface SimConfig {
    * (it predates the strategy split and no work item asked to split it) —
    * only the discrete `ddStrategy` enum is split per player here.
    */
-  opponentDdStrategy?: DDStrategy;
+  /**
+   * Opponents never use 'equity' (E-3: out of scope for opponents) — typed
+   * as `NonEquityDDStrategy` so a misconfiguration is a compile error, not
+   * a silent runtime fallback.
+   */
+  opponentDdStrategy?: NonEquityDDStrategy;
   includeFJ: boolean;
   /** Buzz attempt correlation between players (Tesauro: 0.2) */
   rhoB: number;
@@ -61,6 +89,35 @@ export interface SimConfig {
   ddWagerFraction?: number;
   /** Board control model for Daily Doubles. Defaults to 'leader'. */
   boardControl?: BoardControl;
+  /**
+   * Disables `difficultyMultiplier` scaling entirely (treats every clue as
+   * uniform difficulty) when `false`. Default (`undefined`) preserves the
+   * existing scaling — E-4's paper-replication config sets this `false` to
+   * match Ben's IYSE 6644 paper's stated limitation (no difficulty-by-value
+   * term in that model).
+   */
+  difficultyScaling?: boolean;
+  /**
+   * Final Jeopardy wagering strategy (E-5). Default 'standard' (closed-form
+   * lock/crush/two-thirds-rule wagering). 'equity' grid-searches YOUR wager
+   * only; opponents always use 'standard'. See `simulateFinalJeopardy`.
+   */
+  fjStrategy?: 'standard' | 'equity';
+  /**
+   * Gates the two-thirds-rule upgrade for 2nd place's FJ wager under
+   * `fjStrategy: 'standard'` (E-5). Default `'allIn'` — bets everything,
+   * which is the ORIGINAL pre-E-5 behavior and is regression-locked.
+   * `'twoThirdsRule'` is the documented upgrade (bet enough to cover 3rd
+   * doubling rather than going all-in) — additive, off by default so the
+   * seeded regression-lock snapshot stays byte-identical.
+   */
+  fjSecondPlaceStrategy?: 'allIn' | 'twoThirdsRule';
+  /**
+   * V(S) table (E-2) used by `ddStrategy: 'equity'` for YOUR (player 0)
+   * wagers only. Undefined ⇒ equity DD falls back to the 'aggressive'
+   * preset (documented, never a silent min-bet) — see `simulateRound`.
+   */
+  valueTable?: ValueTable;
 }
 
 export const DEFAULT_CONFIG: SimConfig = {
@@ -92,7 +149,10 @@ export interface DDEvent {
 // ─── Constants ───────────────────────────────────────────────────────
 
 const J_VALUES = [200, 400, 600, 800, 1000];
-const DJ_VALUES = [400, 800, 1200, 1600, 2000];
+/** Exported for value-function.ts (E-2), whose rollout table is scoped to
+ *  Double-Jeopardy-and-later states and needs the round's value list to
+ *  sample representative partial boards. */
+export const DJ_VALUES = [400, 800, 1200, 1600, 2000];
 // 6 categories × 5 values = 30 clues per round
 
 /**
@@ -211,6 +271,19 @@ function difficultyMultiplier(value: number, round: 'J' | 'DJ'): number {
   return Math.max(0.25, 1 - (value / 2000) * 0.4);
 }
 
+/**
+ * `difficultyMultiplier`, gated by `config.difficultyScaling` (E-4). Default
+ * (`undefined`/`true`) preserves the original per-value scaling exactly —
+ * the regression lock never sets this field, so its behavior is untouched.
+ * `false` returns a flat 1 (uniform difficulty), matching the paper-
+ * replication config's assumption (Ben's IYSE 6644 paper has no
+ * difficulty-by-clue-value term).
+ */
+function effectiveDifficultyMultiplier(value: number, round: 'J' | 'DJ', config: SimConfig): number {
+  if (config.difficultyScaling === false) return 1;
+  return difficultyMultiplier(value, round);
+}
+
 // ─── Daily Double ────────────────────────────────────────────────────
 
 /**
@@ -322,7 +395,7 @@ function assertNeverDDStrategy(strategy: never): never {
  * floor) — kept as-is for these heuristic presets; a future equity search
  * (E-3) uses the real $5 floor and documents that divergence separately.
  */
-export function ddWager(strategy: DDStrategy, score: number, maxClueValue: number, wagerFraction?: number): number {
+export function ddWager(strategy: NonEquityDDStrategy, score: number, maxClueValue: number, wagerFraction?: number): number {
   if (strategy === 'off') return 0;
   const minWager = maxClueValue; // minimum DD wager is the max clue value in the round
   const safeScore = Math.max(score, minWager);
@@ -373,8 +446,9 @@ function resolveBuzzer(knowsAnswer: boolean[], players: Player[], rng: () => num
 
 // ─── Core simulation ─────────────────────────────────────────────────
 
-/** Build a full round's 30-clue list: 6 categories × the round's 5 row values, in board order. */
-function buildFullBoard(values: number[]): number[] {
+/** Build a full round's 30-clue list: 6 categories × the round's 5 row values, in board order.
+ *  Exported for value-function.ts's (E-2) partial-board sampling. */
+export function buildFullBoard(values: number[]): number[] {
   const clues: number[] = [];
   for (let cat = 0; cat < 6; cat++) {
     for (const v of values) {
@@ -420,7 +494,7 @@ export function simulateRound(
 
   for (let i = 0; i < clues.length; i++) {
     const value = clues[i];
-    const dm = difficultyMultiplier(value, round);
+    const dm = effectiveDifficultyMultiplier(value, round, config);
 
     if (ddIndices.has(i) && config.ddStrategy !== 'off') {
       // Daily Double: board control decides who gets it (see BoardControl).
@@ -432,8 +506,34 @@ export function simulateRound(
       const controllerStrategy = controller === 0
         ? config.ddStrategy
         : (config.opponentDdStrategy ?? config.ddStrategy);
-      const wager = ddWager(controllerStrategy, scores[controller], maxClueValue, config.ddWagerFraction);
       const adjustedP = player.p * dm;
+
+      // E-3: equity dispatch happens HERE, before ddWager — 'equity' never
+      // reaches ddWager's switch (its parameter type statically excludes
+      // 'equity', so the `else` branch below is the only way to satisfy the
+      // compiler). YOUR player (controller 0) only; a misconfigured
+      // opponentDdStrategy of 'equity' (out of scope, E-3) or a missing
+      // valueTable both fall back to 'aggressive' — documented, never a
+      // silent min-bet.
+      let wager: number;
+      if (controller === 0 && controllerStrategy === 'equity') {
+        if (config.valueTable) {
+          const remainingAfter = clues.slice(i + 1);
+          wager = equityWager(
+            { knowledge: player.b * player.p, buzzerSpeed: player.buzzerSpeed },
+            scores,
+            remainingAfter.length,
+            adjustedP,
+            config.valueTable,
+          );
+        } else {
+          wager = ddWager('aggressive', scores[controller], maxClueValue, config.ddWagerFraction);
+        }
+      } else {
+        const safeStrategy: NonEquityDDStrategy = controllerStrategy === 'equity' ? 'aggressive' : controllerStrategy;
+        wager = ddWager(safeStrategy, scores[controller], maxClueValue, config.ddWagerFraction);
+      }
+
       const correct = rng() < adjustedP;
       const scoreBefore = scores[controller];
 
@@ -509,45 +609,170 @@ export function simulateRound(
 }
 
 /**
- * Simulate Final Jeopardy.
- *
- * Wagering: simplified score-position strategy.
- * - Leader bets to cover 2nd place doubling up (or $0 if already locked).
- * - 2nd place bets everything.
- * - 3rd place bets everything.
- * Correlated accuracy (ρ_p = 0.3 per Tesauro).
+ * Closed-form Final Jeopardy wagering (E-5's `fjStrategy: 'standard'`) — The
+ * Final Wager conventions, encoded per PLAN.md's documented cases:
+ * - **Leader with a lock** (score > 2× second place already): bet ≤
+ *   (lead − 2×second), the can't-lose wager. We bet exactly $0, the
+ *   simplest safe choice — this is provably byte-identical to the
+ *   pre-E-5 formula below at every lockMargin ≥ 0 (2·second−lead+1 ≤ 0
+ *   in that regime, and `Math.max(0, …)` already floored it at 0), so the
+ *   regression lock is unaffected.
+ * - **Leader without a lock**: bet enough to cover 2nd place doubling up,
+ *   `2×second − lead + 1` (original/default behavior, unchanged).
+ * - **2nd place**: default 'allIn' (original behavior, bet everything) —
+ *   the two-thirds-rule upgrade is gated behind
+ *   `config.fjSecondPlaceStrategy: 'twoThirdsRule'`, OFF by default so the
+ *   seeded regression-lock snapshot stays byte-identical. The upgraded rule
+ *   (standard two-thirds reasoning, kept simple per PLAN.md): a proper
+ *   leader covers second doubling and, on a miss, falls to 2·lead −
+ *   2·second − 1; second's winning line in that leader-misses scenario is
+ *   to wager just enough to clear it (2·lead − 3·second), while also
+ *   covering 3rd's double (2·third − second + 1) — bet the larger of the
+ *   two, floored at 0 and capped at second's score.
+ * - **3rd place**: all-in (default). A "targeted" variant (bet just enough
+ *   to overtake one specific rival if both leader and 2nd miss) is a
+ *   documented deferral — 3rd's win probability is already small enough
+ *   that this refinement has negligible effect on aggregate win-rate
+ *   stats, not worth the added branching for this plan's scope.
  */
-export function simulateFinalJeopardy(
-  players: Player[],
+export function computeFJWagersStandard(
   scores: [number, number, number],
-  _config: SimConfig,
-  rng: () => number = Math.random,
+  config: SimConfig,
 ): [number, number, number] {
   const sorted = [0, 1, 2].sort((a, b) => scores[b] - scores[a]);
   const leader = sorted[0];
   const second = sorted[1];
   const third = sorted[2];
 
-  // Eliminate players with $0 or less — they can't play FJ
   const canPlay = scores.map(s => s > 0);
-
-  // Calculate wagers
   const wagers: [number, number, number] = [0, 0, 0];
 
   if (canPlay[leader]) {
     const leadAmount = scores[leader];
     const secondAmount = canPlay[second] ? scores[second] : 0;
-    // Bet enough to cover 2nd place doubling, minimum $0
-    wagers[leader] = Math.max(0, 2 * secondAmount - leadAmount + 1);
-    // Don't bet more than you have
-    wagers[leader] = Math.min(wagers[leader], scores[leader]);
+    const lockMargin = leadAmount - 2 * secondAmount;
+    if (lockMargin > 0) {
+      // Can't-lose wager: any bet in [0, lockMargin] preserves the lock
+      // regardless of FJ's outcome; $0 is the simplest safe choice.
+      wagers[leader] = 0;
+    } else {
+      wagers[leader] = Math.min(scores[leader], Math.max(0, 2 * secondAmount - leadAmount + 1));
+    }
   }
+
   if (canPlay[second]) {
-    wagers[second] = scores[second]; // bet everything
+    if (config.fjSecondPlaceStrategy === 'twoThirdsRule') {
+      const secondAmount = scores[second];
+      const leadAmount = scores[leader];
+      const thirdAmount = canPlay[third] ? scores[third] : 0;
+      // Clear the leader's post-miss score (leader covers, misses, lands on
+      // 2·lead − 2·second − 1) AND cover third doubling up — see doc above.
+      const coverLeaderMiss = 2 * leadAmount - 3 * secondAmount;
+      const coverThirdDouble = 2 * thirdAmount - secondAmount + 1;
+      wagers[second] = Math.min(secondAmount, Math.max(0, coverLeaderMiss, coverThirdDouble));
+    } else {
+      wagers[second] = scores[second]; // all-in (default, original behavior)
+    }
   }
+
   if (canPlay[third]) {
-    wagers[third] = scores[third]; // bet everything
+    wagers[third] = scores[third]; // all-in (default; "targeted" deferred, see doc above)
   }
+
+  return wagers;
+}
+
+const FJ_EQUITY_GRID_POINTS = 25;
+const FJ_EQUITY_SAMPLES = 1500;
+
+/**
+ * E-5 `fjStrategy: 'equity'` — grid search YOUR (player 0) wager over
+ * [0, yourScore] maximizing win probability via correlated FJ accuracy
+ * draws (ρ≈0.3, same `correlatedBernoulli` machinery as the rest of FJ).
+ * Opponents' wagers are fixed at their 'standard' values (computed once,
+ * independent of your choice — real FJ wagers are simultaneous).
+ *
+ * FJ is terminal, so an exact expected-value calc over the 8 right/wrong
+ * combinations (weighting each by the correlated joint probability) is
+ * possible in principle, but the Gaussian-copula joint here has no closed
+ * form without a numerical integral over the shared latent factor. Direct
+ * Monte Carlo sampling (this function) is simpler to get right and
+ * consistent with the rest of the engine's MC style — documented choice,
+ * per PLAN.md's "either approach fine, document."
+ *
+ * Ties are split (co-champion = 0.5 win), matching the engine's documented
+ * tie-rule elsewhere.
+ *
+ * Exported for E-5's standard-vs-equity gap measurement test.
+ */
+export function fjEquityGridSearch(
+  players: Player[],
+  scores: [number, number, number],
+  opponentWagers: [number, number, number],
+  rng: () => number,
+): number {
+  const yourScore = Math.max(scores[0], 0);
+  if (yourScore <= 0) return 0;
+
+  const fjProbs = players.map(p => p.fjAccuracy);
+
+  let bestWager = 0;
+  let bestWinProb = -Infinity;
+
+  for (let g = 0; g < FJ_EQUITY_GRID_POINTS; g++) {
+    const wager = Math.round((yourScore * g) / (FJ_EQUITY_GRID_POINTS - 1));
+    let wins = 0;
+    for (let s = 0; s < FJ_EQUITY_SAMPLES; s++) {
+      const correct = correlatedBernoulli(fjProbs, 0.3, rng);
+      const final: [number, number, number] = [
+        scores[0] + (correct[0] ? wager : -wager),
+        scores[1] + (correct[1] ? opponentWagers[1] : -opponentWagers[1]),
+        scores[2] + (correct[2] ? opponentWagers[2] : -opponentWagers[2]),
+      ];
+      const maxScore = Math.max(...final);
+      const winners = final.filter(v => v === maxScore).length;
+      if (final[0] === maxScore) wins += 1 / winners;
+    }
+    const winProb = wins / FJ_EQUITY_SAMPLES;
+    if (winProb > bestWinProb) {
+      bestWinProb = winProb;
+      bestWager = wager;
+    }
+  }
+
+  return bestWager;
+}
+
+function computeFJWagersEquity(
+  players: Player[],
+  scores: [number, number, number],
+  config: SimConfig,
+  rng: () => number,
+): [number, number, number] {
+  // Opponents always use 'standard' wagers — 'equity' FJ is YOUR-player-only.
+  const standard = computeFJWagersStandard(scores, config);
+  const yourWager = fjEquityGridSearch(players, scores, standard, rng);
+  return [yourWager, standard[1], standard[2]];
+}
+
+/**
+ * Simulate Final Jeopardy. Wagering dispatches on `config.fjStrategy`
+ * (E-5): 'standard' (default) = closed-form lock/crush/two-thirds-rule
+ * wagering (`computeFJWagersStandard`); 'equity' = grid-searched wager for
+ * YOUR player against opponents' 'standard' wagers (`computeFJWagersEquity`).
+ * Correlated accuracy (ρ_p = 0.3 per Tesauro) either way.
+ */
+export function simulateFinalJeopardy(
+  players: Player[],
+  scores: [number, number, number],
+  config: SimConfig,
+  rng: () => number = Math.random,
+): [number, number, number] {
+  const canPlay = scores.map(s => s > 0);
+  const strategy = config.fjStrategy ?? 'standard';
+  const wagers = strategy === 'equity'
+    ? computeFJWagersEquity(players, scores, config, rng)
+    : computeFJWagersStandard(scores, config);
 
   // Correlated accuracy (slightly higher correlation for FJ)
   const fjProbs = players.map(p => p.fjAccuracy);

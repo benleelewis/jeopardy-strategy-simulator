@@ -13,8 +13,16 @@ import {
   type Player,
   type SimConfig,
   type SimState,
-  type DDStrategy,
+  type NonEquityDDStrategy,
+  computeFJWagersStandard,
+  fjEquityGridSearch,
 } from './sim-engine';
+import {
+  buildValueTable,
+  queryV,
+  equityWager,
+  type ValueTable,
+} from './value-function';
 import { OPPONENT_PROFILES } from './opponent-models';
 import { interpolateOpponent, DIMENSIONS, buildSimParams } from './dimensions';
 
@@ -662,7 +670,7 @@ describe('sim-engine', () => {
       // makes this a compile error in real usage; at runtime (bypassing the
       // type system, as a caller with stale types might) it throws rather
       // than silently returning the minimum wager.
-      const bogus = 'bogus-strategy' as unknown as DDStrategy;
+      const bogus = 'bogus-strategy' as unknown as NonEquityDDStrategy;
       expect(() => ddWager(bogus, 10000, 1000)).toThrow();
     });
   });
@@ -693,5 +701,306 @@ describe('sim-engine', () => {
       }
       expect(sawNonLeader).toBe(true);
     });
+  });
+
+  // ─── E-2: Game-state value function V(S) (PLAN.md) ─────────────────────
+
+  describe('value function V(S) (E-2)', () => {
+    // One default-dims table shared by the invariant tests below; built
+    // lazily so the (measured, reported) cost is paid exactly once.
+    let defaultTable: ValueTable | null = null;
+    const getDefaultTable = (): ValueTable => {
+      if (!defaultTable) {
+        defaultTable = buildValueTable(
+          OPPONENT_PROFILES.average, DEFAULT_CONFIG, mulberry32(20260703),
+        );
+      }
+      return defaultTable;
+    };
+
+    it('build budget: default table builds within budget; time and size reported', () => {
+      const table = getDefaultTable();
+      const bytes = table.data.byteLength;
+      console.log(
+        `[E-2 V-table] cells=${table.cellCount} rollouts/cell=${table.rolloutsPerCell} ` +
+        `build=${table.buildMs.toFixed(0)}ms size=${(bytes / 1024).toFixed(0)}KB`,
+      );
+      // Target is ~5s (PLAN.md); measured ~4s on the dev machine. The
+      // assertion ceiling is 10s so slower CI hardware doesn't flake while
+      // still catching order-of-magnitude regressions.
+      expect(table.buildMs).toBeLessThan(10000);
+      expect(table.cellCount).toBe(table.data.length);
+      expect(bytes).toBeLessThan(2 * 1024 * 1024); // ≤ ~2MB per PLAN.md
+    }, 30000);
+
+    it('V ∈ [0,1] across a broad state scan', () => {
+      const table = getDefaultTable();
+      const rng = mulberry32(5);
+      for (let i = 0; i < 500; i++) {
+        const v = queryV(table, {
+          knowledge: rng(),
+          buzzerSpeed: rng(),
+          scores: [
+            Math.floor(rng() * 40000) - 5000,
+            Math.floor(rng() * 40000) - 5000,
+            Math.floor(rng() * 40000) - 5000,
+          ],
+          cluesRemaining: Math.floor(rng() * 32),
+        });
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThanOrEqual(1);
+        expect(Number.isFinite(v)).toBe(true);
+      }
+    }, 30000);
+
+    it('V is monotone non-decreasing in your score (statistical tolerance)', () => {
+      const table = getDefaultTable();
+      const values: number[] = [];
+      for (const s of [1000, 5000, 9000, 13000, 17000, 21000]) {
+        values.push(queryV(table, {
+          knowledge: 0.4, buzzerSpeed: 0.5,
+          scores: [s, 6000, 6000], cluesRemaining: 12,
+        }));
+      }
+      // Coarse MC table ⇒ allow small local dips (2pp), require global rise.
+      for (let i = 1; i < values.length; i++) {
+        expect(values[i], `V dropped at step ${i}: ${values.map(v => v.toFixed(3)).join(' → ')}`)
+          .toBeGreaterThanOrEqual(values[i - 1] - 0.02);
+      }
+      expect(values[values.length - 1]).toBeGreaterThan(values[0]);
+    }, 30000);
+
+    it('pre-FJ lock with FJ off → V ≈ 1', () => {
+      // Small FJ-off table: with 0 clues remaining and no FJ, a strict
+      // leader wins with certainty, so V must be ≈1 (ratio-based dims keep
+      // interpolation from mixing in trailing states; see value-function.ts
+      // design note).
+      const config: SimConfig = { ...DEFAULT_CONFIG, includeFJ: false };
+      const table = buildValueTable(OPPONENT_PROFILES.average, config, mulberry32(7), {
+        dims: {
+          skillKnowledge: { min: 0, max: 1, n: 2 },
+          skillBuzzer: { min: 0, max: 1, n: 2 },
+          yourShare: { min: 0, max: 1.5, n: 6 },
+          leaderRatio: { min: 0, max: 2, n: 5 },
+          thirdRatio: { min: 0, max: 2, n: 5 },
+          cluesRemaining: { min: 0, max: 30, n: 4 },
+        },
+        rolloutsPerCell: 10,
+      });
+      // Lock: your score > 2× the best opponent, 0 clues remaining.
+      const v = queryV(table, {
+        knowledge: 0.4, buzzerSpeed: 0.5,
+        scores: [20000, 5000, 3000], cluesRemaining: 0,
+      });
+      expect(v).toBeGreaterThan(0.95);
+    }, 30000);
+
+    it('out-of-range queries clamp to table bounds', () => {
+      const table = getDefaultTable();
+      // Beyond-max score and beyond-max cluesRemaining must equal the
+      // at-bound query, not extrapolate.
+      const atBound = queryV(table, {
+        knowledge: 1, buzzerSpeed: 1,
+        scores: [100000, 0, 0], cluesRemaining: 30,
+      });
+      const beyond = queryV(table, {
+        knowledge: 5, buzzerSpeed: 9,
+        scores: [10000000, -50000, -50000], cluesRemaining: 300,
+      });
+      expect(beyond).toBeCloseTo(atBound, 6);
+
+      // Deep-negative "you" is a worst-bucket state, still in [0,1].
+      const broke = queryV(table, {
+        knowledge: -1, buzzerSpeed: -1,
+        scores: [-10000, 30000, 20000], cluesRemaining: -5,
+      });
+      expect(broke).toBeGreaterThanOrEqual(0);
+      expect(broke).toBeLessThanOrEqual(1);
+    }, 30000);
+  });
+
+  // ─── E-3: 'equity' DD strategy (PLAN.md) ────────────────────────────────
+
+  describe("equity DD strategy (E-3)", () => {
+    const you = makePlayer(0.7, 0.85, 0.6, 0.5);
+    const opp = makePlayer(0.6, 0.87, 0.5, 0.5);
+
+    it("'equity' without a valueTable falls back to 'aggressive' exactly (same seed ⇒ same games)", () => {
+      const run = (ddStrategy: SimConfig['ddStrategy']) => {
+        const rng = mulberry32(2026);
+        const config: SimConfig = { ...DEFAULT_CONFIG, ddStrategy, opponentDdStrategy: 'aggressive' };
+        const out = [];
+        for (let i = 0; i < 30; i++) out.push(simulateGame(you, opp, opp, config, true, rng));
+        return out;
+      };
+      // Documented fallback (never a silent min-bet): identical rng
+      // consumption ⇒ bit-identical games.
+      expect(run('equity')).toEqual(run('aggressive'));
+    });
+
+    it("'equity' with a valueTable produces your-player DD wagers within [$5, score] (real-rules floor)", () => {
+      const table = buildValueTable(OPPONENT_PROFILES.average, DEFAULT_CONFIG, mulberry32(11), {
+        dims: {
+          skillKnowledge: { min: 0, max: 1, n: 2 },
+          skillBuzzer: { min: 0, max: 1, n: 2 },
+          yourShare: { min: 0, max: 1.5, n: 5 },
+          leaderRatio: { min: 0, max: 2, n: 4 },
+          thirdRatio: { min: 0, max: 2, n: 4 },
+          cluesRemaining: { min: 0, max: 30, n: 4 },
+        },
+        rolloutsPerCell: 8,
+      });
+      const config: SimConfig = {
+        ...DEFAULT_CONFIG,
+        ddStrategy: 'equity',
+        opponentDdStrategy: 'aggressive',
+        valueTable: table,
+      };
+      const rng = mulberry32(31);
+      let yourDDs = 0;
+      for (let i = 0; i < 150; i++) {
+        const result = simulateGame(you, opp, opp, config, true, rng);
+        for (const e of result.ddEvents!) {
+          if (e.player !== 0) continue;
+          yourDDs++;
+          expect(e.wager).toBeGreaterThanOrEqual(5);
+          expect(e.wager).toBeLessThanOrEqual(Math.max(e.scoreBefore, 5));
+        }
+      }
+      expect(yourDDs).toBeGreaterThan(20); // sampled enough to mean something
+    }, 30000);
+
+    it('equityWager respects the $5 floor when your score is tiny or negative', () => {
+      const table = buildValueTable(OPPONENT_PROFILES.average, DEFAULT_CONFIG, mulberry32(13), {
+        dims: {
+          skillKnowledge: { min: 0, max: 1, n: 2 },
+          skillBuzzer: { min: 0, max: 1, n: 2 },
+          yourShare: { min: 0, max: 1.5, n: 4 },
+          leaderRatio: { min: 0, max: 2, n: 3 },
+          thirdRatio: { min: 0, max: 2, n: 3 },
+          cluesRemaining: { min: 0, max: 30, n: 3 },
+        },
+        rolloutsPerCell: 5,
+      });
+      expect(equityWager({ knowledge: 0.4, buzzerSpeed: 0.5 }, [3, 5000, 4000], 10, 0.55, table)).toBe(5);
+      expect(equityWager({ knowledge: 0.4, buzzerSpeed: 0.5 }, [-800, 5000, 4000], 10, 0.55, table)).toBe(5);
+      const w = equityWager({ knowledge: 0.4, buzzerSpeed: 0.5 }, [12000, 5000, 4000], 10, 0.55, table);
+      expect(w).toBeGreaterThanOrEqual(5);
+      expect(w).toBeLessThanOrEqual(12000);
+    }, 30000);
+  });
+
+  // ─── E-5: Final Jeopardy strategies (PLAN.md) ───────────────────────────
+
+  describe('Final Jeopardy strategies (E-5)', () => {
+    describe("closed-form 'standard' wagers", () => {
+      it('leader with a lock makes the can\'t-lose wager ($0 ≤ lead − 2×second)', () => {
+        // [20000, 8000, 5000]: 20000 > 2×8000 ⇒ locked.
+        const wagers = computeFJWagersStandard([20000, 8000, 5000], DEFAULT_CONFIG);
+        expect(wagers[0]).toBe(0);
+        expect(wagers[0]).toBeLessThanOrEqual(20000 - 2 * 8000);
+      });
+
+      it('leader without a lock covers second doubling (+$1)', () => {
+        const wagers = computeFJWagersStandard([18000, 10000, 5000], DEFAULT_CONFIG);
+        expect(wagers[0]).toBe(2 * 10000 - 18000 + 1); // 2001
+      });
+
+      it('second place bets everything by default (original behavior, regression-locked)', () => {
+        const wagers = computeFJWagersStandard([18000, 10000, 5000], DEFAULT_CONFIG);
+        expect(wagers[1]).toBe(10000);
+      });
+
+      it("second place under 'twoThirdsRule' covers the leader-miss scenario and third's double", () => {
+        const config: SimConfig = { ...DEFAULT_CONFIG, fjSecondPlaceStrategy: 'twoThirdsRule' };
+        // Leader covers and misses ⇒ lands on 2×18000 − 2×10000 − 1 = 15999.
+        // Second needs 2×18000 − 3×10000 = 6000 to clear it when right.
+        const wagers = computeFJWagersStandard([18000, 10000, 5000], config);
+        expect(wagers[1]).toBe(6000);
+        // When second holds > 2/3 of the leader, covering third dominates:
+        // leader 15000, second 11000, third 5000 ⇒ leader-miss lands on
+        // 2×15000−2×11000−1 = 7999 < 11000 ⇒ cover-third term (2×5000−11000+1 → 0-floored).
+        const wagers2 = computeFJWagersStandard([15000, 11000, 5000], config);
+        expect(wagers2[1]).toBe(0);
+      });
+
+      it('third place bets everything; non-positive scores cannot wager', () => {
+        const wagers = computeFJWagersStandard([18000, 10000, 5000], DEFAULT_CONFIG);
+        expect(wagers[2]).toBe(5000);
+        const withBroke = computeFJWagersStandard([10000, -500, 3000], DEFAULT_CONFIG);
+        expect(withBroke[1]).toBe(0);
+      });
+    });
+
+    it("fjStrategy 'equity' runs end-to-end and produces finite scores", () => {
+      const you = makePlayer(0.7, 0.85, 0.6, 0.55);
+      const opp = makePlayer(0.6, 0.87, 0.5, 0.5);
+      const config: SimConfig = { ...DEFAULT_CONFIG, fjStrategy: 'equity' };
+      const rng = mulberry32(17);
+      const scores = simulateFinalJeopardy([you, opp, opp], [15000, 14000, 8000], config, rng);
+      for (const s of scores) expect(Number.isFinite(s)).toBe(true);
+    });
+
+    it("measures and reports the standard-vs-equity FJ gap at reference states", () => {
+      const you = makePlayer(0.7, 0.85, 0.6, 0.55);
+      const opp = makePlayer(0.6, 0.87, 0.5, 0.5);
+      const players = [you, opp, opp];
+
+      // Evaluate a fixed wager profile: seeded MC win prob, ties split 0.5
+      // (fjEquityGridSearch's tie rule). Draws are INDEPENDENT Bernoullis
+      // here (documented simplification: the engine's FJ resolution uses
+      // ρ≈0.3 correlated accuracy, but both strategies are scored by the
+      // SAME evaluator with the SAME seed, so the standard-vs-equity gap
+      // is a fair paired comparison either way).
+      const evalWinProb = (
+        scores: [number, number, number],
+        yourWager: number,
+        oppWagers: [number, number, number],
+        seed: number,
+      ): number => {
+        const rng = mulberry32(seed);
+        const n = 20000;
+        let w = 0;
+        for (let s = 0; s < n; s++) {
+          const correct = [
+            rng() < you.fjAccuracy,
+            rng() < opp.fjAccuracy,
+            rng() < opp.fjAccuracy,
+          ];
+          const final = [
+            scores[0] + (correct[0] ? yourWager : -yourWager),
+            scores[1] + (correct[1] ? oppWagers[1] : -oppWagers[1]),
+            scores[2] + (correct[2] ? oppWagers[2] : -oppWagers[2]),
+          ];
+          const maxScore = Math.max(...final);
+          const winners = final.filter(v => v === maxScore).length;
+          if (final[0] === maxScore) w += 1 / winners;
+        }
+        return w / n;
+      };
+
+      const states: { name: string; scores: [number, number, number] }[] = [
+        { name: 'lock leader   [20000, 8000, 5000]', scores: [20000, 8000, 5000] },
+        { name: 'tight leader  [15000, 14000, 8000]', scores: [15000, 14000, 8000] },
+        { name: 'you second    [14000, 15000, 8000]', scores: [14000, 15000, 8000] },
+      ];
+
+      const lines: string[] = [];
+      for (const { name, scores } of states) {
+        const standard = computeFJWagersStandard(scores, DEFAULT_CONFIG);
+        const equityYourWager = fjEquityGridSearch(players, scores, standard, mulberry32(555));
+        const pStandard = evalWinProb(scores, standard[0], standard, 9001);
+        const pEquity = evalWinProb(scores, equityYourWager, standard, 9001);
+        const gapPP = (pEquity - pStandard) * 100;
+        lines.push(
+          `  ${name}: standard $${standard[0]} → ${(pStandard * 100).toFixed(1)}%, ` +
+          `equity $${equityYourWager} → ${(pEquity * 100).toFixed(1)}% (gap ${gapPP >= 0 ? '+' : ''}${gapPP.toFixed(1)}pp)`,
+        );
+        // Equity should never be materially worse than the closed form
+        // (small negative slack for the grid search's own MC noise).
+        expect(pEquity, `${name}: equity FJ underperformed standard`).toBeGreaterThanOrEqual(pStandard - 0.02);
+      }
+      console.log(`[E-5 FJ] standard vs equity win-prob gap (uncorrelated eval draws):\n${lines.join('\n')}`);
+    }, 30000);
   });
 });
