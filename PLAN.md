@@ -203,10 +203,14 @@ is additive; default config unchanged (rollback = revert commit).
 
 **E-4 Dual-config validation harness** (`app/src/sim/equity-validation.test.ts`).
 - **Paper-replication config** (symmetric players, ρ=0, no difficulty scaling —
-  matches the IYSE 6644 model): scores [19400, 6400, 17200], last DD, 13 clues
-  remaining, 55% confidence → equity at $3,200/$5,000/$12,400 reproduces
-  36%/45%/55% within ±5pp, seeded. Monotonicity: equity non-decreasing across
-  that wager range.
+  matches the IYSE 6644 model): scores [19400, 6400, 17200], **you = the
+  second-place $17,200 player** (CORRECTED during implementation from
+  JeopardySimulator.ipynb `player = 2` — the plan originally said leader; the
+  published numbers only reproduce from second place), exact 13-clue board from
+  the notebook, win = strict lead at DJ end (no FJ), 55% confidence → equity at
+  $3,200/$5,000/$12,400 reproduces 36%/45%/55% within ±5pp, seeded.
+  **IMPLEMENTED & PASSING: 36.4% / 43.2% / 55.2% (worst dev 1.8pp).**
+  Monotonicity: equity non-decreasing across that wager range.
 - **Production-config invariants** (Tesauro opponents, correlations, difficulty
   scaling — where paper numbers do NOT apply): monotonicity in confidence;
   equity-vs-wager curve is near-flat at the optimum (Tesauro's risk-mitigation
