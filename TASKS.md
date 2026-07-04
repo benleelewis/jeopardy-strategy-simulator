@@ -1,6 +1,24 @@
 # Jeopardy Strategy Simulator — Task Tracker
 
-*Updated 2026-03-22*
+*Updated 2026-07-04 — PLAN.md (approved via /autoplan) implemented; see Phase D below*
+
+## Phase D: Equity Wagering + Calibration + Honest Axes (PLAN.md — IMPLEMENTED 2026-07-04)
+- [x] P-0: baseline commit (app/ into git for the first time), dataset gitignored
+- [x] E-0: seeded RNG, simulateFromState, per-player DD strategy, board control (tests 30→46)
+- [x] E-1: clue-stats pipeline — empirical DD priors from 9,064 games (row 3 is the DD mode, not bottom row)
+- [x] E-2: skill-aware V(S) rollout table (47KB, ~4s build, ratio-parameterized)
+- [x] E-3: 'equity' DD strategy ($5 floor, type-excluded from ddWager switch)
+- [x] E-4: dual-config validation — **paper replication PASSES: 36.4/43.2/55.2 vs 36/45/55** (you = 2nd-place player, per notebook)
+- [x] E-5: closed-form + equity FJ (equity from 2nd place beats all-in by +11.4pp)
+- [x] E-6: empirical priors wired with visible fallback; difficulty curves documented (no contradiction demonstrable)
+- [x] E-7: DD Strategy radiogroup, V-table worker lifecycle, knob pinning, equity mini-chart + confidence slider, DD heat strip, All Games 10→25 sims/game, first UI tests (tests 69→88)
+- [x] P-1: axis preset pills A/B/C with format()/unit + buzz-race calibration curve
+- [x] P-2: dash-pattern contour confidence + refined pass 300→450 games/cell
+- [x] P-3: journey bridge (marker pulse + link to All Games)
+- [x] P-4: YourNumber above GamesControls
+- [ ] Deploy to Vercel (blocked: needs `vercel login` — Ben)
+- [ ] **C1 checkpoint**: Ben re-rates the Explorer on the deployed app (target ≥7/10)
+- [ ] Polish: heat map title overlaps top axis label (smoke-test finding)
 
 ## Phase 0: Setup
 - [x] Read all PDFs and handoff documents
