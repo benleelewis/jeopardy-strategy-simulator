@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { HeatMap } from './components/HeatMap';
 import { ControlsPanel } from './components/ControlsPanel';
 import { StatsPanel } from './components/StatsPanel';
@@ -9,7 +9,16 @@ import { YourNumber } from './components/YourNumber';
 import { MarginalReturns } from './components/MarginalReturns';
 import { GameAnalyzer, type GameEstimate } from './components/GameAnalyzer';
 import { DEFAULT_CONFIG } from './sim/sim-engine';
-import { DIMENSIONS, type DimensionName } from './sim/dimensions';
+import {
+  DIMENSIONS,
+  AXIS_PRESETS,
+  findPresetForAxes,
+  valueToFraction,
+  fractionToValue,
+  buzzSpeedToWinPct,
+  type DimensionName,
+  type AxisPreset,
+} from './sim/dimensions';
 import './App.css';
 
 // --- URL hash state for shareable links ---
@@ -115,6 +124,11 @@ export default function App() {
   const [theme, setTheme] = useState<'clean' | 'jeopardy'>(initial?.theme ?? 'clean');
   const [tab, setTab] = useState<AppState['tab']>(initial?.tab ?? 'your-game');
 
+  // P-3 journey bridge: bumped on each GameAnalyzer submit → the Explorer
+  // YOU marker pulses once; the bridge link to All Games appears.
+  const [pulseToken, setPulseToken] = useState(0);
+  const bridgeVisible = pulseToken > 0;
+
   // Games data
   const [games, setGames] = useState<GameData[] | null>(null);
   const [gameWinRates, setGameWinRates] = useState<number[] | null>(null);
@@ -134,13 +148,15 @@ export default function App() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const prevSimParamsRef = useRef<any>({});
 
-  const config = {
+  // Memoized: config is a dependency of HeatMap's grid effect and several
+  // callbacks — a fresh object every render would retrigger them all.
+  const config = useMemo(() => ({
     ...DEFAULT_CONFIG,
     includeFJ,
     ...(xAxis !== 'ddAggression' && yAxis !== 'ddAggression'
       ? { ddWagerFraction: pinnedValues.ddAggression ?? DIMENSIONS.ddAggression.defaultValue, ddStrategy: 'aggressive' as const }
       : {}),
-  };
+  }), [includeFJ, xAxis, yAxis, pinnedValues]);
 
   // --- URL hash sync (write) ---
   useEffect(() => {
@@ -268,36 +284,69 @@ export default function App() {
 
   // --- Handlers ---
 
+  // pinnedValues store REAL dimension values; position.x/y are [0,1]
+  // fractions. For the legacy [0,1] dims the two coincide, but a dollars
+  // dim (expectedCoryat, P-1) needs explicit conversion when a value moves
+  // between "axis position" and "pinned value".
+  const stashAxisValue = (axis: DimensionName, fraction: number) =>
+    setPinnedValues(prev => ({ ...prev, [axis]: fractionToValue(DIMENSIONS[axis], fraction) }));
+  const restoreAxisFraction = (axis: DimensionName) =>
+    valueToFraction(DIMENSIONS[axis], pinnedValues[axis] ?? DIMENSIONS[axis].defaultValue);
+
   const handleAxisChange = useCallback((axis: 'x' | 'y', newDim: DimensionName) => {
     if (axis === 'x') {
       if (newDim === yAxis) {
-        setPinnedValues(prev => ({ ...prev, [xAxis]: position.x }));
+        stashAxisValue(xAxis, position.x);
         setXAxis(newDim);
         setYAxis(xAxis);
         setPosition({ x: position.y, y: position.x });
       } else {
-        setPinnedValues(prev => ({ ...prev, [xAxis]: position.x }));
+        stashAxisValue(xAxis, position.x);
         setPosition(prev => ({
-          x: pinnedValues[newDim] ?? DIMENSIONS[newDim].defaultValue,
+          x: restoreAxisFraction(newDim),
           y: prev.y,
         }));
         setXAxis(newDim);
       }
     } else {
       if (newDim === xAxis) {
-        setPinnedValues(prev => ({ ...prev, [yAxis]: position.y }));
+        stashAxisValue(yAxis, position.y);
         setYAxis(newDim);
         setXAxis(yAxis);
         setPosition({ x: position.y, y: position.x });
       } else {
-        setPinnedValues(prev => ({ ...prev, [yAxis]: position.y }));
+        stashAxisValue(yAxis, position.y);
         setPosition(prev => ({
           x: prev.x,
-          y: pinnedValues[newDim] ?? DIMENSIONS[newDim].defaultValue,
+          y: restoreAxisFraction(newDim),
         }));
         setYAxis(newDim);
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [xAxis, yAxis, position, pinnedValues]);
+
+  // P-1: axis-preset pills. Selection is stored in the existing URL-hash
+  // machinery implicitly — a preset is just an (xa, ya) pair, and both are
+  // already encoded/decoded (encodeState/decodeState above), so preset
+  // URLs are shareable with no new hash keys.
+  const activePreset = findPresetForAxes(xAxis, yAxis);
+
+  const handlePresetSelect = useCallback((preset: AxisPreset) => {
+    if (preset.xAxis === xAxis && preset.yAxis === yAxis) return;
+    // Stash current axis values (in real units) so they survive as pinned
+    // dims, then restore the new axes' last-known values.
+    setPinnedValues(prev => ({
+      ...prev,
+      [xAxis]: fractionToValue(DIMENSIONS[xAxis], position.x),
+      [yAxis]: fractionToValue(DIMENSIONS[yAxis], position.y),
+    }));
+    setXAxis(preset.xAxis);
+    setYAxis(preset.yAxis);
+    setPosition({
+      x: valueToFraction(DIMENSIONS[preset.xAxis], pinnedValues[preset.xAxis] ?? DIMENSIONS[preset.xAxis].defaultValue),
+      y: valueToFraction(DIMENSIONS[preset.yAxis], pinnedValues[preset.yAxis] ?? DIMENSIONS[preset.yAxis].defaultValue),
+    });
   }, [xAxis, yAxis, position, pinnedValues]);
 
   const handlePinnedChange = useCallback((name: string, value: number) => {
@@ -323,20 +372,31 @@ export default function App() {
         numSims: 10,
       });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [xAxis, yAxis, xVal, yVal, pinnedValues, config]);
 
   const handleGameEstimate = useCallback((estimate: GameEstimate) => {
+    // Map the game entry onto whichever axes are active (P-1: each preset
+    // candidate gets its own estimate source):
+    //  - estimate.knowledge is correct/(correct+wrong+1) — literally
+    //    precision (accuracy when buzzing), so it feeds 'precision' too.
+    //  - estimate.buzzerSpeed is (correct+wrong)/60 — an attempt-rate
+    //    proxy, so it feeds 'buzzAttemptRate' directly and 'buzzRaceWinPct'
+    //    through the forward calibration curve.
+    //  - estimate.coryat is the user's real Coryat, in dollars.
     const estimateMap: Record<string, number> = {
       knowledge: estimate.knowledge,
       buzzerSpeed: estimate.buzzerSpeed,
+      precision: estimate.knowledge,
+      buzzAttemptRate: estimate.buzzerSpeed,
+      buzzRaceWinPct: buzzSpeedToWinPct(estimate.buzzerSpeed),
+      expectedCoryat: estimate.coryat,
     };
 
     const normalize = (axis: DimensionName) => {
       const dim = DIMENSIONS[axis];
       const val = estimateMap[axis];
       if (val === undefined) return undefined;
-      return (val - dim.range[0]) / (dim.range[1] - dim.range[0]);
+      return valueToFraction(dim, val);
     };
 
     const newX = normalize(xAxis) ?? position.x;
@@ -347,6 +407,8 @@ export default function App() {
       y: Math.max(0, Math.min(1, newY)),
     });
     setTab('explorer');
+    // P-3: land on the Explorer with a one-shot pulse + bridge link.
+    setPulseToken(t => t + 1);
   }, [xAxis, yAxis, position]);
 
   return (
@@ -392,16 +454,47 @@ export default function App() {
         ) : tab === 'explorer' ? (
           <>
             <div className="viz-container">
-              <HeatMap
-                position={position}
-                onPositionChange={setPosition}
-                xAxis={xAxis}
-                yAxis={yAxis}
-                onAxisChange={handleAxisChange}
-                pinnedValues={pinnedValues}
-                config={config}
-                onWinRateUpdate={setWinRate}
-              />
+              <div className="viz-stack">
+                {/* P-1: axis-preset pills — three candidate framings for the
+                    C1 bake-off. Selection lives in the URL hash via xa/ya. */}
+                <div className="axis-pills" role="group" aria-label="Axis preset">
+                  {AXIS_PRESETS.map(p => (
+                    <button
+                      key={p.id}
+                      className={`pill ${activePreset?.id === p.id ? 'pill-active' : ''}`}
+                      aria-pressed={activePreset?.id === p.id}
+                      title={p.description}
+                      onClick={() => handlePresetSelect(p)}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+                {activePreset && (
+                  <div className="axis-pills-caption">{activePreset.description}</div>
+                )}
+                {/* P-3: journey bridge — routes the GameAnalyzer payoff
+                    onward to the All Games spine. */}
+                {bridgeVisible && (
+                  <button
+                    className="bridge-link"
+                    onClick={() => setTab('games')}
+                  >
+                    Next: see how you'd do in {games ? games.length.toLocaleString() : '8,600'} real games →
+                  </button>
+                )}
+                <HeatMap
+                  position={position}
+                  onPositionChange={setPosition}
+                  xAxis={xAxis}
+                  yAxis={yAxis}
+                  onAxisChange={handleAxisChange}
+                  pinnedValues={pinnedValues}
+                  config={config}
+                  onWinRateUpdate={setWinRate}
+                  pulseToken={pulseToken}
+                />
+              </div>
             </div>
             <div className="side-panel">
               <StatsPanel
@@ -437,6 +530,15 @@ export default function App() {
               <div className="games-loading">Loading game data...</div>
             ) : (
               <>
+                {/* P-4: payoff first, knobs second — YourNumber (the
+                    headline + histogram) renders ABOVE the controls.
+                    Pure reorder; the graph below is untouched. */}
+                {gameWinRates && (
+                  <YourNumber
+                    winRates={gameWinRates}
+                    isSimulating={gameSimProgress !== null}
+                  />
+                )}
                 <GamesControls
                   position={position}
                   onPositionChange={setPosition}
@@ -447,12 +549,6 @@ export default function App() {
                   includeFJ={includeFJ}
                   onFJChange={setIncludeFJ}
                 />
-                {gameWinRates && (
-                  <YourNumber
-                    winRates={gameWinRates}
-                    isSimulating={gameSimProgress !== null}
-                  />
-                )}
                 <div className="games-header">
                   <p className="games-subtitle">
                     Every regular-season game, colored by your simulated win rate.

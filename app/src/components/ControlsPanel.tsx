@@ -1,4 +1,4 @@
-import { DIMENSIONS, type DimensionName } from '../sim/dimensions';
+import { DIMENSIONS, getPinnedDimNames, valueToFraction, fractionToValue, type DimensionName } from '../sim/dimensions';
 
 interface Props {
   xAxis: DimensionName;
@@ -32,9 +32,11 @@ export function ControlsPanel({
   includeFJ, onFJChange,
   theme, onThemeChange,
 }: Props) {
-  // Pinned dimensions = all dimensions that aren't currently axes
-  const pinnedDims = Object.entries(DIMENSIONS)
-    .filter(([name]) => name !== xAxis && name !== yAxis);
+  // Pinned dimensions for the current axis pair (P-1: several dims write
+  // the same Player fields, so only the dims that actually apply for these
+  // axes are rendered — same source of truth buildSimParams uses).
+  const pinnedDims = getPinnedDimNames(xAxis, yAxis)
+    .map(name => [name, DIMENSIONS[name]] as const);
 
   return (
     <div>
@@ -43,29 +45,34 @@ export function ControlsPanel({
       </div>
 
       {pinnedDims.map(([name, dim]) => {
+        // pinnedValues store REAL dimension values (dollars for a Coryat
+        // dim, fractions for [0,1] dims); the slider itself runs on a
+        // normalized 0–1000 track so any range works, and all display
+        // goes through dim.format() — never a hardcoded percent.
         const value = pinnedValues[name] ?? dim.defaultValue;
-        const pct = Math.round(value * 100);
+        const sliderPos = Math.round(valueToFraction(dim, value) * 1000);
         return (
           <div key={name} style={sectionStyle}>
             <label style={{ ...labelStyle, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
               <span>{dim.label}</span>
-              <span style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-h)' }}>{pct}%</span>
+              <span style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-h)' }}>{dim.format(value)}</span>
             </label>
             <input
               type="range"
-              min={dim.range[0] * 100}
-              max={dim.range[1] * 100}
-              value={value * 100}
-              onChange={(e) => onPinnedChange(name, parseInt(e.target.value) / 100)}
+              min={0}
+              max={1000}
+              value={sliderPos}
+              onChange={(e) => onPinnedChange(name, fractionToValue(dim, parseInt(e.target.value, 10) / 1000))}
               style={{ width: '100%', accentColor: 'var(--accent)' }}
               aria-label={dim.label}
-              aria-valuemin={dim.range[0] * 100}
-              aria-valuemax={dim.range[1] * 100}
-              aria-valuenow={pct}
+              aria-valuemin={dim.range[0]}
+              aria-valuemax={dim.range[1]}
+              aria-valuenow={value}
+              aria-valuetext={dim.format(value)}
             />
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-muted)', marginTop: 2 }}>
-              <span>{Math.round(dim.range[0] * 100)}%</span>
-              <span>{Math.round(dim.range[1] * 100)}%</span>
+              <span>{dim.format(dim.range[0])}</span>
+              <span>{dim.format(dim.range[1])}</span>
             </div>
           </div>
         );

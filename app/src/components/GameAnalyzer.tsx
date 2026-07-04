@@ -227,24 +227,10 @@ export function GameAnalyzer({ onEstimate }: Props) {
           {submitted ? 'Update Position' : 'See Where You Sit'}
         </button>
 
-        {submitted && (
-          <div style={{
-            marginTop: 12,
-            padding: '8px 12px',
-            background: 'var(--bg)',
-            borderRadius: 6,
-            fontSize: 13,
-            color: 'var(--text-muted)',
-            textAlign: 'center',
-          }}>
-            Your marker has been placed on the Explorer.
-            {ddWager && (
-              <div style={{ marginTop: 4 }}>
-                DD wager: ${parseInt(ddWager, 10).toLocaleString()} ({ddCorrect ? 'correct' : 'wrong'})
-              </div>
-            )}
-          </div>
-        )}
+        {/* P-3: the old "Your marker has been placed on the Explorer."
+            message rendered here — in the tab the user just left, where
+            nobody could see it. Removed; the Explorer now shows the
+            pulsing YOU marker plus the journey-bridge link instead. */}
 
         {/* Quick presets */}
         <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>

@@ -65,6 +65,107 @@
   justify-content: center;
 }
 
+/* Column wrapper: axis pills + bridge link stacked above the heat map */
+.viz-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+/* P-1: axis-preset pills */
+.axis-pills {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.pill {
+  min-height: 44px; /* a11y touch target */
+  padding: 8px 18px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.pill:hover {
+  border-color: var(--accent, #58a6ff);
+  color: var(--text-h);
+}
+
+.pill[aria-pressed="true"],
+.pill-active {
+  border-color: var(--accent, #58a6ff);
+  background: var(--accent, #58a6ff);
+  color: #fff;
+  font-weight: 600;
+}
+
+.axis-pills-caption {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  max-width: 560px;
+}
+
+/* P-3: journey bridge link (Explorer → All Games) */
+.bridge-link {
+  min-height: 44px; /* a11y touch target */
+  padding: 8px 16px;
+  border: 1px solid var(--accent, #58a6ff);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent, #58a6ff);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.bridge-link:hover {
+  background: var(--accent, #58a6ff);
+  color: #fff;
+}
+
+/* P-3: one-shot YOU-marker pulse. Single iteration — never loops. */
+.you-pulse {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  margin-left: -12px;
+  margin-top: -12px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.6);
+  pointer-events: none;
+  animation: you-pulse-anim 1.2s ease-out 1 forwards;
+}
+
+@keyframes you-pulse-anim {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(3.2);
+    opacity: 0;
+  }
+}
+
+/* Respect reduced-motion: keep a near-zero duration (instead of
+   animation: none) so animationend still fires and the element is
+   removed from the DOM. */
+@media (prefers-reduced-motion: reduce) {
+  .you-pulse {
+    animation-duration: 1ms;
+  }
+}
+
 .side-panel {
   width: 320px;
   flex-shrink: 0;

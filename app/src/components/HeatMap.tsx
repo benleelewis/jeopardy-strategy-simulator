@@ -3,7 +3,13 @@ import * as d3 from 'd3';
 import type { SimConfig } from '../sim/sim-engine';
 import type { GridCell } from '../sim/sim-worker';
 import { FAMOUS_PLAYERS } from '../sim/opponent-models';
-import { DIMENSIONS, type DimensionName } from '../sim/dimensions';
+import {
+  DIMENSIONS,
+  getFamousPlayerPosition,
+  fractionToValue,
+  valueToFraction,
+  type DimensionName,
+} from '../sim/dimensions';
 import { gaussianBlur2D } from '../sim/math-utils';
 
 interface Props {
@@ -15,6 +21,9 @@ interface Props {
   pinnedValues: Record<string, number>;
   config: SimConfig;
   onWinRateUpdate: (rate: number | null) => void;
+  /** Bumped by App.tsx each time the GameAnalyzer bridge (P-3) lands you
+   *  here — triggers a single, non-looping pulse on the YOU marker. */
+  pulseToken?: number;
 }
 
 const WIDTH = 560;
@@ -35,6 +44,7 @@ export function HeatMap({
   position, onPositionChange,
   xAxis, yAxis, onAxisChange,
   pinnedValues, config, onWinRateUpdate,
+  pulseToken,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -43,6 +53,10 @@ export function HeatMap({
   const [computing, setComputing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [stale, setStale] = useState(false); // true when axes changed but grid hasn't arrived yet
+  // P-3: single-shot pulse on the YOU marker when the GameAnalyzer bridge
+  // lands here. Rendered as a one-iteration CSS animation (see .you-pulse
+  // in App.css); cleared on animationend so it never loops.
+  const [pulsing, setPulsing] = useState(false);
 
   // Axis selector popover state
   const [popover, setPopover] = useState<{ axis: 'x' | 'y'; anchorX: number; anchorY: number } | null>(null);
@@ -116,7 +130,16 @@ export function HeatMap({
     setResolution(20);
   }, [xAxis, yAxis, pinnedValues, config]);
 
-  // When fast pass completes, start refined pass
+  // When fast pass completes, start refined pass.
+  //
+  // P-2: refined-pass sims raised 300 → 450 (1.5×). Measured on the same
+  // engine + buildSimParams path in Node (tsx, mulberry32-seeded, full
+  // 41×41 grid, JIT-warmed; worker wall time scales the same way):
+  //   before: 300 games/cell ≈ 19.4 ms/cell ≈ 32.6 s full refined pass
+  //   after:  450 games/cell ≈ 28.5 ms/cell ≈ 47.9 s full refined pass
+  // Same ballpark (cost is linear in sims; 600 games/cell measured 67.6 s
+  // and was rejected). Per-cell binomial SE near winRate 0.5 improves
+  // ~±2.9pp → ~±2.4pp before Gaussian smoothing.
   useEffect(() => {
     if (grid.length > 0 && resolution === 20 && !computing && workerRef.current) {
       setComputing(true);
@@ -127,11 +150,16 @@ export function HeatMap({
         yAxis,
         pinnedValues,
         config,
-        gamesPerCell: 300,
+        gamesPerCell: 450,
       });
       setResolution(40);
     }
   }, [grid, resolution, computing]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // P-3: fire the one-shot pulse whenever the bridge token bumps.
+  useEffect(() => {
+    if (pulseToken && pulseToken > 0) setPulsing(true);
+  }, [pulseToken]);
 
   // Debounced win rate computation
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -141,12 +169,16 @@ export function HeatMap({
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
     debounceRef.current = setTimeout(() => {
+      // buildSimParams (worker side) expects REAL dimension values, not
+      // [0,1] position fractions. For the legacy [0,1] dims the two were
+      // identical, which hid this; a dollars axis (expectedCoryat, P-1)
+      // makes the conversion load-bearing.
       workerRef.current?.postMessage({
         type: 'computeWinRate',
         xAxis,
         yAxis,
-        xVal: position.x,
-        yVal: position.y,
+        xVal: fractionToValue(DIMENSIONS[xAxis], position.x),
+        yVal: fractionToValue(DIMENSIONS[yAxis], position.y),
         pinnedValues,
         config,
         nGames: 500,
@@ -241,6 +273,14 @@ export function HeatMap({
       .attr('fill', (_, i) => colorScale(smoothedValues[i] ?? 0))
       .attr('opacity', 0.85);
 
+    // P-2 contour confidence: dash pattern keyed off refinement stage.
+    // Per-cell sample counts don't come back from the worker (gridResult
+    // carries winRate only), so the stage is the sample-count proxy:
+    // fast pass (20×20, 150 games/cell) = dashed, refined pass (40×40,
+    // 450 games/cell) = solid. Dash — NOT opacity — because faint lines
+    // on a win-rate color field read as "low value here."
+    const isFastPass = res <= 20;
+
     // Contour lines
     if (grid.length > 100) {
       const contourRes = res + 1;
@@ -266,7 +306,8 @@ export function HeatMap({
         .attr('fill', 'none')
         .attr('stroke', '#fff')
         .attr('stroke-width', 1.5)
-        .attr('stroke-opacity', 0.7);
+        .attr('stroke-opacity', 0.7)
+        .attr('stroke-dasharray', isFastPass ? '6,4' : null);
 
       // Contour labels
       for (const contour of contours) {
@@ -305,14 +346,20 @@ export function HeatMap({
         onPositionChangeRef.current({ x: nx, y: ny });
       });
 
-    // Famous player markers
+    // Famous player markers. Positions resolve per-axis (P-1: each preset's
+    // dims have their own lookup — see getFamousPlayerPosition); a player
+    // with no known position on either axis is hidden, never guessed.
+    // Values are in real dimension units (e.g. dollars for expectedCoryat),
+    // so normalize through valueToFraction before hitting the [0,1] scales.
+    const xDimCfg = DIMENSIONS[xAxis];
+    const yDimCfg = DIMENSIONS[yAxis];
     for (const player of FAMOUS_PLAYERS) {
-      const xPos = player.positions[xAxis];
-      const yPos = player.positions[yAxis];
+      const xPos = getFamousPlayerPosition(player, xAxis);
+      const yPos = getFamousPlayerPosition(player, yAxis);
       if (xPos === undefined || yPos === undefined) continue;
 
-      const px = xScale(xPos);
-      const py = yScale(yPos);
+      const px = xScale(valueToFraction(xDimCfg, xPos));
+      const py = yScale(valueToFraction(yDimCfg, yPos));
       const isEstimated = player.estimated?.has(xAxis) || player.estimated?.has(yAxis);
 
       if (isEstimated) {
@@ -406,14 +453,17 @@ export function HeatMap({
 
     youGroup.call(drag);
 
-    // Axes
+    // Axes — tick labels speak each dimension's own units via format()
+    // (P-1 load-bearing fix: a dollars axis must never render through a
+    // hardcoded percent formatter). Scales stay [0,1] fractions; ticks map
+    // fraction → real value → formatted string.
     const xAxisG = d3.axisBottom(xScale)
       .ticks(5)
-      .tickFormat(d => `${Math.round(+d * 100)}%`);
+      .tickFormat(d => xDimCfg.format(fractionToValue(xDimCfg, +d)));
 
     const yAxisG = d3.axisLeft(yScale)
       .ticks(5)
-      .tickFormat(d => `${Math.round(+d * 100)}%`);
+      .tickFormat(d => yDimCfg.format(fractionToValue(yDimCfg, +d)));
 
     g.append('g')
       .attr('transform', `translate(0,${INNER_H})`)
@@ -465,6 +515,23 @@ export function HeatMap({
           {`Win Rate by ${xDim.label} × ${yDim.label}`}
         </text>
       </svg>
+
+      {/* P-3: one-shot YOU-marker pulse (single CSS animation iteration,
+          removed on animationend — never loops; prefers-reduced-motion
+          handled in App.css). Keyed by pulseToken so repeat submits
+          restart the animation. */}
+      {pulsing && (
+        <div
+          key={pulseToken}
+          className="you-pulse"
+          aria-hidden="true"
+          onAnimationEnd={() => setPulsing(false)}
+          style={{
+            left: MARGIN.left + xScale(position.x),
+            top: MARGIN.top + yScale(position.y),
+          }}
+        />
+      )}
 
       {/* Clickable X-axis label */}
       <button
@@ -581,6 +648,13 @@ export function HeatMap({
               </button>
             );
           })}
+        </div>
+      )}
+
+      {/* P-2 legend: contour confidence encoding */}
+      {grid.length > 100 && (
+        <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px', marginTop: 4 }}>
+          dashed contour = fewer samples
         </div>
       )}
 

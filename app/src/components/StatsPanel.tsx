@@ -1,4 +1,4 @@
-import { DIMENSIONS, type DimensionName } from '../sim/dimensions';
+import { DIMENSIONS, fractionToValue, type DimensionName } from '../sim/dimensions';
 
 interface Props {
   position: { x: number; y: number };
@@ -13,10 +13,17 @@ const sectionStyle: React.CSSProperties = {
 };
 
 export function StatsPanel({ position, winRate, xAxis, yAxis }: Props) {
+  // Win rate is always a percentage regardless of which axes are active.
   const pct = (v: number) => `${Math.round(v * 100)}%`;
 
   const xDim = DIMENSIONS[xAxis];
   const yDim = DIMENSIONS[yAxis];
+
+  // Position values speak each dimension's own units via format() —
+  // P-1's load-bearing fix: a dollars axis (expectedCoryat) must never
+  // render through the percent formatter above.
+  const xDisplay = xDim.format(fractionToValue(xDim, position.x));
+  const yDisplay = yDim.format(fractionToValue(yDim, position.y));
 
   // Bottleneck logic only applies to Knowledge × Buzzer axes
   const showBottleneck = xAxis === 'knowledge' && yAxis === 'buzzerSpeed';
@@ -42,13 +49,13 @@ export function StatsPanel({ position, winRate, xAxis, yAxis }: Props) {
             <div style={{ fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
               {xDim.label}
             </div>
-            <div style={{ fontSize: '24px', fontWeight: 700, color: 'var(--text-h)' }}>{pct(position.x)}</div>
+            <div style={{ fontSize: '24px', fontWeight: 700, color: 'var(--text-h)' }}>{xDisplay}</div>
           </div>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
               {yDim.label}
             </div>
-            <div style={{ fontSize: '24px', fontWeight: 700, color: 'var(--text-h)' }}>{pct(position.y)}</div>
+            <div style={{ fontSize: '24px', fontWeight: 700, color: 'var(--text-h)' }}>{yDisplay}</div>
           </div>
         </div>
 

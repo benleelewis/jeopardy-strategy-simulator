@@ -9,13 +9,16 @@
  */
 
 import { useEffect, useState, useRef } from 'react';
-import { DIMENSIONS, type DimensionName } from '../sim/dimensions';
+import { DIMENSIONS, getPinnedDimNames, type DimensionName } from '../sim/dimensions';
 import type { SimConfig } from '../sim/sim-engine';
 
 interface MarginalResult {
   dimension: DimensionName;
   label: string;
   currentValue: number;
+  /** Current value rendered in the dimension's own units via format()
+   *  (P-1: "$11,000" for a Coryat dim, "45%" for a rate dim). */
+  formattedValue: string;
   marginalReturn: number; // win rate change per 10% improvement
 }
 
@@ -53,9 +56,12 @@ export function MarginalReturns({ xAxis, yAxis, position, pinnedValues, config }
     }
 
     setComputing(true);
-    const dims = Object.entries(DIMENSIONS) as [DimensionName, typeof DIMENSIONS[DimensionName]][];
+    // Only the dims active for this axis pair (axes + applied pinned dims,
+    // P-1) — sweeping every registered dim would waste sims on dims that
+    // buildSimParams ignores for these axes.
+    const activeDimNames: DimensionName[] = [xAxis, yAxis, ...getPinnedDimNames(xAxis, yAxis)];
+    const dims = activeDimNames.map(name => [name, DIMENSIONS[name]] as const);
     const pending: MarginalResult[] = [];
-    let completed = 0;
 
     const worker = new Worker(
       new URL('../sim/sim-worker.ts', import.meta.url),
@@ -142,7 +148,6 @@ export function MarginalReturns({ xAxis, yAxis, position, pinnedValues, config }
         partialResults[item.dim][item.direction] = msg.winRate;
 
         queueIdx++;
-        completed++;
 
         // Check if this dimension is complete
         const pr = partialResults[item.dim];
@@ -154,6 +159,7 @@ export function MarginalReturns({ xAxis, yAxis, position, pinnedValues, config }
             dimension: item.dim,
             label: dim.label,
             currentValue: currentValues[item.dim],
+            formattedValue: dim.format(currentValues[item.dim]),
             marginalReturn: marginal,
           });
         }
@@ -196,6 +202,8 @@ export function MarginalReturns({ xAxis, yAxis, position, pinnedValues, config }
       </div>
       <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
         Which improvement gives the biggest win rate boost?
+        Bars show the win-rate change from a +10%-of-range step in each
+        dimension (e.g. +$3,000 Coryat, or +10pp on a rate).
       </div>
 
       {results ? (
@@ -236,6 +244,10 @@ function MarginalBar({ result, isTop }: { result: MarginalResult; isTop: boolean
         flexShrink: 0,
       }}>
         {result.label}
+        {/* Current value in the dimension's own units (P-1 format()) */}
+        <div style={{ fontSize: 10, fontFamily: 'monospace', opacity: 0.7 }}>
+          at {result.formattedValue}
+        </div>
       </div>
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 4 }}>
         <div style={{
