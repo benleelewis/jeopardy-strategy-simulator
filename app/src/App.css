@@ -293,6 +293,17 @@
   accent-color: var(--accent);
 }
 
+/* E-7: read-only DD Strategy reflection on the All Games tab */
+.gc-strategy-badge {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.gc-strategy-badge strong {
+  color: var(--text-h);
+}
+
 /* Your Game tab */
 .your-game-container {
   flex: 1;

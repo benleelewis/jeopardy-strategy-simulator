@@ -24,6 +24,13 @@ interface Props {
   /** Bumped by App.tsx each time the GameAnalyzer bridge (P-3) lands you
    *  here — triggers a single, non-looping pulse on the YOU marker. */
   pulseToken?: number;
+  /** E-7 UI-states table: while a V-table build is in flight for Optimal
+   *  (equity), the heat map keeps showing the PREVIOUS strategy's colors
+   *  (never blanked) but dimmed 60% + a progress readout — never
+   *  confidently-wrong undimmed stale colors. 'idle' when Optimal isn't
+   *  the active selection at all. */
+  equityBuildStatus?: 'idle' | 'building' | 'ready' | 'failed';
+  equityBuildProgress?: number;
 }
 
 const WIDTH = 560;
@@ -45,6 +52,8 @@ export function HeatMap({
   xAxis, yAxis, onAxisChange,
   pinnedValues, config, onWinRateUpdate,
   pulseToken,
+  equityBuildStatus = 'idle',
+  equityBuildProgress = 0,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -240,10 +249,17 @@ export function HeatMap({
     // Only clear the main group, not axis labels (they're React-managed)
     svg.selectAll('.main-group').remove();
 
+    // E-7: a V-table build in flight for Optimal (equity) dims the
+    // PREVIOUS strategy's colors to 40% opacity (60% dimmed) rather than
+    // blanking or leaving them confidently undimmed — see the UI-states
+    // table. Axis-change staleness (pre-existing) wins if both apply.
+    const equityDimmed = equityBuildStatus === 'building';
+    const opacity = stale ? 0.3 : equityDimmed ? 0.4 : 1;
+
     const g = svg.append('g')
       .attr('class', 'main-group')
       .attr('transform', `translate(${MARGIN.left},${MARGIN.top})`)
-      .style('opacity', stale ? 0.3 : 1)
+      .style('opacity', opacity)
       .style('transition', 'opacity 0.3s ease');
 
     const res = Math.round(Math.sqrt(grid.length)) - 1;
@@ -478,7 +494,7 @@ export function HeatMap({
 
     // Axis styling
     g.selectAll('.domain, .tick line').attr('stroke', 'var(--border)');
-  }, [grid, xAxis, yAxis, stale]);
+  }, [grid, xAxis, yAxis, stale, equityBuildStatus]);
 
   // ── Effect: Update marker position ──
   useEffect(() => {
@@ -661,6 +677,14 @@ export function HeatMap({
       {computing && (
         <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px', marginTop: 8 }}>
           {stale ? 'Recomputing' : 'Computing'}... {Math.round(progress * 100)}%
+        </div>
+      )}
+
+      {/* E-7: V-table build progress — heat map still shows the previous
+          strategy's (dimmed) colors above while this runs. */}
+      {equityBuildStatus === 'building' && (
+        <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px', marginTop: 4 }}>
+          Building Optimal (equity) strategy... {Math.round(equityBuildProgress * 100)}%
         </div>
       )}
     </div>

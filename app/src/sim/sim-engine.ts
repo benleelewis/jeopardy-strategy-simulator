@@ -118,6 +118,15 @@ export interface SimConfig {
    * preset (documented, never a silent min-bet) — see `simulateRound`.
    */
   valueTable?: ValueTable;
+  /**
+   * Empirical Daily Double row placement priors (E-6), loaded from
+   * `clue-stats.json` at app startup (9,064 complete games). When present,
+   * `pickDDIndices` uses these instead of the hardcoded `DD_ROW_WEIGHTS`
+   * folklore — same renormalization-over-open-rows behavior either way.
+   * Undefined (the default — e.g. every existing test/caller) preserves
+   * `DD_ROW_WEIGHTS` exactly, so the seeded regression lock is untouched.
+   */
+  ddRowWeights?: { J: number[]; DJ: number[] };
 }
 
 export const DEFAULT_CONFIG: SimConfig = {
@@ -321,6 +330,12 @@ function pickDDIndices(
   round: 'J' | 'DJ',
   count: number,
   rng: () => number,
+  // E-6: empirical row weights (clue-stats.json), when supplied by the
+  // caller, replace the DD_ROW_WEIGHTS folklore fallback. Defaulting the
+  // parameter (rather than reading config directly) keeps this function's
+  // full-board-equivalence regression lock trivially inspectable: every
+  // existing call site that doesn't pass a 5th arg is byte-identical.
+  rowWeights: number[] = DD_ROW_WEIGHTS,
 ): Set<number> {
   const roundValues = round === 'J' ? J_VALUES : DJ_VALUES;
 
@@ -339,10 +354,10 @@ function pickDDIndices(
 
   const fullBoard = activeRowIdx.length === roundValues.length;
   const activeWeights = fullBoard
-    ? DD_ROW_WEIGHTS // raw weights, untouched — preserves the regression lock exactly
+    ? rowWeights // raw weights, untouched — preserves the regression lock exactly
     : (() => {
-        const total = activeRowIdx.reduce((sum, row) => sum + DD_ROW_WEIGHTS[row], 0);
-        return activeRowIdx.map(row => DD_ROW_WEIGHTS[row] / total);
+        const total = activeRowIdx.reduce((sum, row) => sum + rowWeights[row], 0);
+        return activeRowIdx.map(row => rowWeights[row] / total);
       })();
 
   const ddIndices = new Set<number>();
@@ -487,9 +502,11 @@ export function simulateRound(
   const maxClueValue = roundValues[roundValues.length - 1];
   const boardControl: BoardControl = config.boardControl ?? 'leader';
 
-  // Place Daily Doubles (renormalized over the rows still in play — see pickDDIndices).
+  // Place Daily Doubles (renormalized over the rows still in play — see
+  // pickDDIndices). E-6: config.ddRowWeights[round], when present, replaces
+  // the DD_ROW_WEIGHTS folklore fallback (pickDDIndices's own default).
   const ddIndices = config.ddStrategy !== 'off'
-    ? pickDDIndices(clues, round, ddCount, rng)
+    ? pickDDIndices(clues, round, ddCount, rng, config.ddRowWeights?.[round])
     : new Set<number>();
 
   for (let i = 0; i < clues.length; i++) {

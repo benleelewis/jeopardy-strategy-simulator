@@ -17,6 +17,12 @@
  *
  *   IN:  { type: 'cancel' }
  *   OUT: { type: 'error', message }
+ *
+ *   IN:  { type: 'buildValueTable', opponentProfile, config, seed, cacheKey }
+ *   OUT: { type: 'buildValueTableProgress', pct, cacheKey }
+ *   OUT: { type: 'buildValueTableResult', table, cacheKey }  (table.data is a
+ *        transferred Float32Array — see the persistent-worker postMessage call)
+ *   OUT: { type: 'buildValueTableError', message, cacheKey }
  */
 
 import {
@@ -24,9 +30,12 @@ import {
   calculateWinRate,
   simulateGame,
   sampleOpponent,
+  mulberry32,
   type SimConfig,
+  type DDStrategy,
   DEFAULT_CONFIG,
 } from './sim-engine';
+import { buildValueTable } from './value-function';
 import { DIMENSIONS, buildSimParams, type DimensionName } from './dimensions';
 import { calibrateOpponent } from './calibrate';
 
@@ -55,6 +64,36 @@ self.onmessage = (e: MessageEvent) => {
 
   if (msg.type === 'loadGames') {
     storedGames = msg.games;
+    return;
+  }
+
+  if (msg.type === 'buildValueTable') {
+    // E-7: built in the PERSISTENT worker (App.tsx's gameWorkerRef posts this
+    // message) — never HeatMap's own worker — so the table is built exactly
+    // once and handed to every consumer (see PLAN.md E-2 "where the table
+    // lives"). Not gated by `cancelled`/the shared cancel flag below: a
+    // table build is a distinct, longer-running operation from grid/
+    // all-games sims and App.tsx handles its own cancel semantics (dropping
+    // a late result) rather than interrupting this synchronous call.
+    const { opponentProfile, config, seed, cacheKey } = msg;
+    try {
+      const rng = mulberry32(seed ?? 0xF00D);
+      const table = buildValueTable(opponentProfile, config ?? DEFAULT_CONFIG, rng, {
+        onProgress: (pct) => self.postMessage({ type: 'buildValueTableProgress', pct, cacheKey }),
+      });
+      // Transfer the Float32Array payload — no copy, per E-2's spec.
+      // Cast: this tsconfig's `lib` is DOM (Window.postMessage), not
+      // webworker (DedicatedWorkerGlobalScope.postMessage) — `self` here
+      // is actually the latter at runtime (it's the transferable-list
+      // overload real workers support), so the transfer-list argument
+      // needs a local type assertion rather than a project-wide lib change.
+      (self.postMessage as unknown as (message: unknown, transfer: Transferable[]) => void)(
+        { type: 'buildValueTableResult', table, cacheKey },
+        [table.data.buffer],
+      );
+    } catch (err) {
+      self.postMessage({ type: 'buildValueTableError', message: String(err), cacheKey });
+    }
     return;
   }
 
@@ -106,7 +145,7 @@ self.onmessage = (e: MessageEvent) => {
         );
 
         // Merge the base config with per-cell overrides
-        const mergedConfig = { ...config, ...cellConfig };
+        const mergedConfig = resolveDDStrategy(config, cellConfig, xAxis, yAxis);
         const { winRate } = calculateWinRate(player, opponentProfile, mergedConfig, gamesPerCell);
 
         grid.push({
@@ -152,7 +191,7 @@ self.onmessage = (e: MessageEvent) => {
       yVal,
       { ...pinnedValues, ...configToPinned(config) },
     );
-    const mergedConfig: SimConfig = { ...config, ...cellConfig };
+    const mergedConfig: SimConfig = resolveDDStrategy(config, cellConfig, xAxis, yAxis);
 
     const results: { winRate: number }[] = [];
     const totalGames = games.length;
@@ -199,7 +238,7 @@ self.onmessage = (e: MessageEvent) => {
         yVal,
         { ...pinnedValues, ...configToPinned(config) },
       );
-      const mergedConfig = { ...config, ...cellConfig };
+      const mergedConfig = resolveDDStrategy(config, cellConfig, xAxis, yAxis);
       const { winRate } = calculateWinRate(player, opponentProfile, mergedConfig, nGames);
       self.postMessage({ type: 'winRateResult', winRate, xVal, yVal });
     } else {
@@ -235,7 +274,7 @@ self.onmessage = (e: MessageEvent) => {
       yVal,
       { ...pinnedValues, ...configToPinned(config) },
     );
-    const mergedConfig: SimConfig = { ...config, ...cellConfig };
+    const mergedConfig: SimConfig = resolveDDStrategy(config, cellConfig, xAxis, yAxis);
 
     const game = games[gameIndex];
     const results: { scores: [number, number, number]; winner: number; history?: [number, number, number][] }[] = [];
@@ -258,4 +297,46 @@ function configToPinned(config: SimConfig): Record<string, number> {
     pinned.ddAggression = config.ddWagerFraction;
   }
   return pinned;
+}
+
+/**
+ * E-7: reconcile the App-level DD Strategy selector with buildSimParams's
+ * per-cell output.
+ *
+ * `dimensions.ts`'s `ddAggression` dimension is *always* one of the active
+ * pinned dims for every axis preset (unless it's literally one of the two
+ * swept axes) and its `toParams` unconditionally returns
+ * `{ ddWagerFraction, ddStrategy: 'aggressive' }` — that's `cellConfig`
+ * below. A naive `{ ...config, ...cellConfig }` merge (the pre-E-7 code)
+ * would silently let that per-cell default stomp any *other* DD Strategy
+ * selection (`'conservative'`, `'truedd'`, or `'equity'`) the user made in
+ * ControlsPanel's new segmented control — since `cellConfig` is spread
+ * last, it always wins.
+ *
+ * Resolution: the DD Strategy selector is a whole-app choice, not a
+ * per-cell sweep, so it should win over the ddAggression pinned-dim
+ * default — UNLESS the user is explicitly exploring "DD Aggression" as one
+ * of the two swept axes, in which case the continuous per-cell fraction
+ * *is* the intended behavior and must be left alone (this is the existing,
+ * pre-E-7 axis-exploration use case). `'aggressive'` itself needs no
+ * special-casing: it's `cellConfig`'s own default, so the naive merge
+ * already produces the right answer and this function is a no-op for it —
+ * this is also why the regression-locked default (App.tsx's pre-E-7
+ * hardcoded `ddStrategy: 'aggressive'`) is untouched.
+ */
+function resolveDDStrategy(
+  config: SimConfig,
+  cellConfig: SimConfig,
+  xAxis: string,
+  yAxis: string,
+): SimConfig {
+  const merged: SimConfig = { ...config, ...cellConfig };
+  const exploringDDAggressionAxis = xAxis === 'ddAggression' || yAxis === 'ddAggression';
+  const selector = config.ddStrategy as DDStrategy | undefined;
+  if (!exploringDDAggressionAxis && selector && selector !== 'aggressive') {
+    merged.ddStrategy = selector;
+    merged.ddWagerFraction = undefined;
+    merged.valueTable = selector === 'equity' ? config.valueTable : undefined;
+  }
+  return merged;
 }

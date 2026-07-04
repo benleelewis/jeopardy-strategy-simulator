@@ -606,6 +606,79 @@ describe('sim-engine', () => {
     });
   });
 
+  describe('empirical DD row weights (E-6)', () => {
+    it('config.ddRowWeights overrides the DD_ROW_WEIGHTS folklore fallback on a full board', () => {
+      const you = makePlayer(0.7, 0.85, 0.6, 0.5);
+      const players = [you, you, you];
+      const rng = mulberry32(777);
+      const fullBoard = buildFullBoardForTest(J_VALUES);
+      // A deliberately distinctive (not DD_ROW_WEIGHTS-like) distribution:
+      // all weight on row 0 (top row) — the opposite of both folklore and
+      // the real clue-stats.json shape, so a passing test can't be
+      // accidentally satisfied by the fallback still being in effect.
+      const empiricalJ = [1, 0, 0, 0, 0];
+      const config: SimConfig = {
+        ...DEFAULT_CONFIG,
+        ddStrategy: 'aggressive',
+        ddRowWeights: { J: empiricalJ, DJ: [0, 0, 0, 0, 1] },
+      };
+
+      const trials = 500;
+      for (let i = 0; i < trials; i++) {
+        const result = simulateRound(players, [0, 0, 0], fullBoard, 1, 'J', config, false, rng);
+        const idx = result.ddEvents[0].clueIndex;
+        expect(J_VALUES.indexOf(fullBoard[idx])).toBe(0); // always row 0, never DD_ROW_WEIGHTS' bottom-heavy default
+      }
+    });
+
+    it('omitting config.ddRowWeights preserves the DD_ROW_WEIGHTS folklore fallback (regression)', () => {
+      const you = makePlayer(0.7, 0.85, 0.6, 0.5);
+      const players = [you, you, you];
+      const rng = mulberry32(778);
+      const fullBoard = buildFullBoardForTest(J_VALUES);
+      const config: SimConfig = { ...DEFAULT_CONFIG, ddStrategy: 'aggressive' }; // no ddRowWeights
+
+      const trials = 4000;
+      const rowCounts = [0, 0, 0, 0, 0];
+      for (let i = 0; i < trials; i++) {
+        const result = simulateRound(players, [0, 0, 0], fullBoard, 1, 'J', config, false, rng);
+        const idx = result.ddEvents[0].clueIndex;
+        rowCounts[J_VALUES.indexOf(fullBoard[idx])]++;
+      }
+      for (let row = 0; row < 5; row++) {
+        const frac = rowCounts[row] / trials;
+        expect(frac).toBeGreaterThan(DD_ROW_WEIGHTS[row] - 0.03);
+        expect(frac).toBeLessThan(DD_ROW_WEIGHTS[row] + 0.03);
+      }
+    });
+
+    it('renormalizes custom ddRowWeights over open rows on a partial board, same as the folklore path', () => {
+      const you = makePlayer(0.7, 0.85, 0.6, 0.5);
+      const players = [you, you, you];
+      const rng = mulberry32(779);
+      // Only row 0 (200, weight 0.1 in this custom set) and row 4 (1000,
+      // weight 0.9) remain.
+      const remaining = [...Array(6).fill(200), ...Array(6).fill(1000)];
+      const config: SimConfig = {
+        ...DEFAULT_CONFIG,
+        ddStrategy: 'aggressive',
+        ddRowWeights: { J: [0.1, 0, 0, 0, 0.9], DJ: [0.02, 0.04, 0.15, 0.31, 0.48] },
+      };
+
+      const trials = 3000;
+      let row0Count = 0;
+      for (let i = 0; i < trials; i++) {
+        const result = simulateRound(players, [0, 0, 0], remaining, 1, 'J', config, false, rng);
+        const idx = result.ddEvents[0].clueIndex;
+        if (remaining[idx] === 200) row0Count++;
+      }
+      const row0Frac = row0Count / trials;
+      // Renormalized over just these two open rows: 0.1 / (0.1 + 0.9) = 0.1
+      expect(row0Frac).toBeGreaterThan(0.06);
+      expect(row0Frac).toBeLessThan(0.14);
+    });
+  });
+
   describe('per-player DD strategy split', () => {
     it('opponentDdStrategy defaults to ddStrategy when omitted (backward compatible)', () => {
       const you = makePlayer(0.7, 0.85, 0.6, 0.5);
@@ -732,6 +805,34 @@ describe('sim-engine', () => {
       expect(table.cellCount).toBe(table.data.length);
       expect(bytes).toBeLessThan(2 * 1024 * 1024); // ≤ ~2MB per PLAN.md
     }, 30000);
+
+    it('onProgress (E-7) fires once per skillKnowledge outer iteration, ending near 1', () => {
+      const calls: number[] = [];
+      buildValueTable(
+        OPPONENT_PROFILES.average, DEFAULT_CONFIG, mulberry32(42),
+        {
+          dims: {
+            skillKnowledge: { min: 0, max: 1, n: 3 },
+            skillBuzzer: { min: 0, max: 1, n: 2 },
+            yourShare: { min: 0, max: 1.5, n: 2 },
+            leaderRatio: { min: 0, max: 2, n: 2 },
+            thirdRatio: { min: 0, max: 2, n: 2 },
+            cluesRemaining: { min: 0, max: 30, n: 2 },
+          },
+          rolloutsPerCell: 2,
+          blurRadius: 0,
+          onProgress: (frac) => calls.push(frac),
+        },
+      );
+      // 3 skillKnowledge buckets → progress calls at 0, 1/3, 2/3, then a
+      // final 1 on completion.
+      expect(calls.length).toBe(4);
+      expect(calls[0]).toBe(0);
+      expect(calls[calls.length - 1]).toBe(1);
+      for (let i = 1; i < calls.length; i++) {
+        expect(calls[i]).toBeGreaterThanOrEqual(calls[i - 1]);
+      }
+    });
 
     it('V ∈ [0,1] across a broad state scan', () => {
       const table = getDefaultTable();

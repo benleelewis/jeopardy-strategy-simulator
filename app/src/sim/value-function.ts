@@ -163,6 +163,18 @@ export interface BuildValueTableOptions {
    */
   nominalTotalAt0Remaining?: number;
   nominalTotalAt30Remaining?: number;
+  /**
+   * E-7: coarse build-progress callback, invoked once per outer
+   * (skillKnowledge) iteration — the outermost of the 6 nested loops, so
+   * this is real (not simulated) progress at `DEFAULT_VALUE_TABLE_DIMS`'
+   * granularity (4 calls: 0, 0.25, 0.5, 0.75, then implicitly 1.0 on
+   * return). Additive/optional — omitting it changes nothing about the
+   * build itself. Intended caller: sim-worker.ts's `buildValueTable`
+   * message handler, forwarding each call as a `buildValueTableProgress`
+   * postMessage so the persistent worker's build drives the same
+   * progress UI the existing grid/all-games sims use.
+   */
+  onProgress?: (frac: number) => void;
 }
 
 // ─── Axis helpers ────────────────────────────────────────────────────────
@@ -302,8 +314,11 @@ export function buildValueTable(
 
   const { skillKnowledge, skillBuzzer, yourShare, leaderRatio, thirdRatio, cluesRemaining } = dims;
 
+  const onProgress = options.onProgress;
+
   let idx = 0;
   for (let iSK = 0; iSK < skillKnowledge.n; iSK++) {
+    onProgress?.(iSK / skillKnowledge.n);
     const knowledge = axisCenter(skillKnowledge, iSK);
     for (let iSB = 0; iSB < skillBuzzer.n; iSB++) {
       const buzzerSpeed = axisCenter(skillBuzzer, iSB);
@@ -349,6 +364,7 @@ export function buildValueTable(
   if (blurRadius > 0) {
     smoothShareSlices(data, dims, blurRadius);
   }
+  onProgress?.(1);
 
   const buildMs = now() - t0;
   return {

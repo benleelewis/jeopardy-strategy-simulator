@@ -211,6 +211,63 @@ Different skill profiles produce genuinely different contribution graph patterns
 - **Lazy sim trigger**: All-games sim only runs when Games tab is active. Params are marked stale on change; sim triggers on tab switch if stale.
 - **URL hash state**: Uses `replaceState` (not `pushState`) to avoid polluting browser history during drag. Only encodes non-default pinned values to keep URLs short.
 
+### E-6 empirical priors vs. difficulty constants (2026-07-04)
+
+`app/public/clue-stats.json` (9,064 complete games, 25,615 DDs) is now wired
+into the engine: `SimConfig.ddRowWeights` overrides the hardcoded
+`DD_ROW_WEIGHTS` folklore in `sim-engine.ts`'s `pickDDIndices`, loaded at App
+startup with a console.warn + fallback on 404/malformed (never silent).
+
+**DD row placement — folklore vs. empirical:**
+
+| Row (top→bottom) | Folklore `DD_ROW_WEIGHTS` | Empirical J | Empirical DJ |
+|---|---|---|---|
+| 1 | 0.02 | 0.0004 | 0.0015 |
+| 2 | 0.04 | 0.070 | 0.098 |
+| 3 | 0.15 | 0.242 | 0.279 |
+| 4 | 0.31 | **0.361** (mode) | **0.382** (mode) |
+| 5 (bottom) | 0.48 | 0.327 | 0.240 |
+
+The empirical mode is row 4 (second-from-bottom), not the bottom row — the
+folklore's "DDs cluster in the bottom row above all else" is directionally
+right (bottom 3 rows still hold ~93% of J DDs and ~90% of DJ DDs) but wrong
+about *which* row dominates, and it overstates the bottom row specifically
+(0.48 folklore vs. 0.33/0.24 empirical). Verdict: the empirical prior is a
+real, material correction — row-1 DDs are also far rarer than folklore's 2%
+suggested (≈0.04–0.15% post-normalization). This has been wired in as the
+new default source of truth (via the startup fetch); `DD_ROW_WEIGHTS`
+remains only as the no-JSON fallback.
+
+**Difficulty-curve comparison (wager-vs-roundmax vs. `difficultyMultiplier`):**
+
+`clue-stats.json`'s `ddWagerVsRoundMax` gives contestants' DD wager size as a
+*multiple of the round's max clue value* (J median 1.2×, mean 1.53×; DJ
+median 1.25×, mean 1.50×) — this is wagering *behavior* (how aggressively
+people bet on a DD they've already been dealt), aggregated across the whole
+round, not split by row.
+
+`difficultyMultiplier(value, round)` in `sim-engine.ts` is a different
+quantity: it scales *precision* (P(correct)) down as a regular clue's dollar
+value rises within a round, modeling "higher-value clues are harder." The
+source TSV schema (verified in `scripts/build-clue-stats.ts`) has no
+correct/incorrect field for any clue, DD or otherwise — so there is no
+accuracy-by-value signal anywhere in this dataset to compare against.
+
+**Verdict: no contradiction is demonstrable, because the two constants
+describe different phenomena and the data needed to test
+`difficultyMultiplier`'s actual claim (accuracy vs. clue value) doesn't
+exist in this dataset.** Recalibrating `difficultyMultiplier` from
+`ddWagerVsRoundMax` would be fitting an assumption to data that measures
+something else — not warranted. `difficultyMultiplier` stays as originally
+calibrated from the tsx prototype's Coryat model, pending a dataset that
+actually carries per-clue correctness. (One weak, non-actionable
+observation: DD wagers cluster tightly around 1.0–1.5× round max regardless
+of round, which is at least consistent with contestants treating a DD as
+"bet big, not everything" — roughly the same territory the engine's
+'aggressive' preset, 75% of score, already occupies — but this is a
+wagering-aggression artifact, not a difficulty measurement, and isn't being
+used to justify anything above.)
+
 ## External References
 
 - [Jeopardy data gist](https://gist.github.com/Miopas/19d6d44b6c21b6b2ba868b13c30fb892) — Jeopardy dataset reference

@@ -7,8 +7,10 @@ import { GameDetail, type SimRun } from './components/GameDetail';
 import { GamesControls } from './components/GamesControls';
 import { YourNumber } from './components/YourNumber';
 import { MarginalReturns } from './components/MarginalReturns';
+import { DDHeatStrip } from './components/DDHeatStrip';
 import { GameAnalyzer, type GameEstimate } from './components/GameAnalyzer';
-import { DEFAULT_CONFIG } from './sim/sim-engine';
+import { DEFAULT_CONFIG, type DDStrategy, type SimConfig } from './sim/sim-engine';
+import type { ValueTable } from './sim/value-function';
 import {
   DIMENSIONS,
   AXIS_PRESETS,
@@ -16,10 +18,49 @@ import {
   valueToFraction,
   fractionToValue,
   buzzSpeedToWinPct,
+  interpolateOpponent,
   type DimensionName,
   type AxisPreset,
 } from './sim/dimensions';
 import './App.css';
+
+/** clue-stats.json shape (scripts/build-clue-stats.ts, E-1/E-6). Only the
+ *  fields this app actually consumes are typed — the file carries more
+ *  debugging metadata (see PLAN.md E-1). */
+export interface ClueStats {
+  generatedAt: string;
+  source: {
+    completeGames: number;
+    [k: string]: unknown;
+  };
+  ddRowWeights: { J: number[]; DJ: number[] };
+  ddWagerVsRoundMax: {
+    J: { p10: number; p25: number; p50: number; p75: number; p90: number; mean: number; n: number };
+    DJ: { p10: number; p25: number; p50: number; p75: number; p90: number; mean: number; n: number };
+  };
+}
+
+/**
+ * E-2's cache-key spec, keyed by the knobs that invalidate a built V-table:
+ * (opponentModel, rhoB, rhoP, opponents' DD strategy incl. ddWagerFraction,
+ * fjStrategy, includeFJ). rhoB/rhoP/opponentDdStrategy/fjStrategy have no UI
+ * control yet (always DEFAULT_CONFIG's fixed values) but are included for
+ * completeness/forward-compat — they're constants today, so they never
+ * cause a spurious cache miss.
+ */
+interface ValueTableCacheInputs {
+  opponentModel: number;
+  rhoB: number;
+  rhoP: number;
+  opponentDdStrategy: string | null;
+  ddWagerFraction: number;
+  fjStrategy: string;
+  includeFJ: boolean;
+}
+
+function valueTableCacheKey(inputs: ValueTableCacheInputs): string {
+  return JSON.stringify(inputs);
+}
 
 // --- URL hash state for shareable links ---
 
@@ -129,6 +170,25 @@ export default function App() {
   const [pulseToken, setPulseToken] = useState(0);
   const bridgeVisible = pulseToken > 0;
 
+  // E-6: empirical clue-level priors (DD row weights + wager quantiles),
+  // fetched once at startup. null = not yet loaded OR load failed — both
+  // cases fall back to sim-engine's hardcoded DD_ROW_WEIGHTS (console.warn'd
+  // below) and hide the DD heat strip (E-7 item 7's documented fallback).
+  const [clueStats, setClueStats] = useState<ClueStats | null>(null);
+
+  // E-7: DD Strategy selector — single source of truth, shared by
+  // ControlsPanel (Explorer) and GamesControls (All Games, read-only
+  // reflection). Default unchanged from the pre-E-7 hardcoded value.
+  const [ddStrategy, setDdStrategy] = useState<DDStrategy>('aggressive');
+  // V-table cache, keyed by valueTableCacheKey(...) — never rebuilt for a
+  // key already present (e.g. switching back and forth, or a tab switch).
+  const [valueTableCache, setValueTableCache] = useState<Record<string, ValueTable>>({});
+  const [equityBuildStatus, setEquityBuildStatus] = useState<'idle' | 'building' | 'ready' | 'failed'>('idle');
+  const [equityBuildProgress, setEquityBuildProgress] = useState(0);
+  const equityBuildCancelledRef = useRef(false);
+  const equityBuildKeyRef = useRef<string | null>(null);
+  const equityBuildingActiveRef = useRef(false);
+
   // Games data
   const [games, setGames] = useState<GameData[] | null>(null);
   const [gameWinRates, setGameWinRates] = useState<number[] | null>(null);
@@ -148,15 +208,51 @@ export default function App() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const prevSimParamsRef = useRef<any>({});
 
+  // E-7: cache key for the current knob settings — computed unconditionally
+  // (not just while Optimal is active) so GameAnalyzer's equity mini-chart
+  // can look up an already-built table without recomputing this itself.
+  const currentCacheKey = useMemo(() => valueTableCacheKey({
+    opponentModel: pinnedValues.opponentStrength ?? DIMENSIONS.opponentStrength.defaultValue,
+    rhoB: DEFAULT_CONFIG.rhoB,
+    rhoP: DEFAULT_CONFIG.rhoP,
+    opponentDdStrategy: null, // no UI control yet — always the ddStrategy fallback
+    ddWagerFraction: pinnedValues.ddAggression ?? DIMENSIONS.ddAggression.defaultValue,
+    fjStrategy: 'standard',
+    includeFJ,
+  }), [pinnedValues.opponentStrength, pinnedValues.ddAggression, includeFJ]);
+
+  const cachedValueTable = valueTableCache[currentCacheKey];
+
   // Memoized: config is a dependency of HeatMap's grid effect and several
   // callbacks — a fresh object every render would retrigger them all.
-  const config = useMemo(() => ({
-    ...DEFAULT_CONFIG,
-    includeFJ,
-    ...(xAxis !== 'ddAggression' && yAxis !== 'ddAggression'
-      ? { ddWagerFraction: pinnedValues.ddAggression ?? DIMENSIONS.ddAggression.defaultValue, ddStrategy: 'aggressive' as const }
-      : {}),
-  }), [includeFJ, xAxis, yAxis, pinnedValues]);
+  const config = useMemo(() => {
+    const cfg: SimConfig = { ...DEFAULT_CONFIG, includeFJ };
+    if (clueStats?.ddRowWeights) cfg.ddRowWeights = clueStats.ddRowWeights;
+
+    if (ddStrategy === 'equity') {
+      // Equity dispatch (sim-engine.ts) needs a valueTable; until one is
+      // cached for the current knobs, equity DD falls back to 'aggressive'
+      // inside the engine itself (documented, never a silent min-bet) — so
+      // it's safe to set ddStrategy:'equity' here even before the build
+      // finishes.
+      cfg.ddStrategy = 'equity';
+      if (cachedValueTable) cfg.valueTable = cachedValueTable;
+    } else if (xAxis === 'ddAggression' || yAxis === 'ddAggression') {
+      // Exploring "DD Aggression" as a swept axis: per-cell continuous
+      // fraction (buildSimParams) already handles this; the base config's
+      // own ddStrategy is a no-op fallback for callers that don't sweep it.
+      cfg.ddStrategy = ddStrategy;
+    } else if (ddStrategy === 'aggressive') {
+      // Pre-E-7 regression-locked default: 'aggressive' still honors the
+      // continuous "DD Aggression" pinned slider exactly as before.
+      cfg.ddStrategy = 'aggressive';
+      cfg.ddWagerFraction = pinnedValues.ddAggression ?? DIMENSIONS.ddAggression.defaultValue;
+    } else {
+      // Conservative / True DD: discrete heuristic, no continuous override.
+      cfg.ddStrategy = ddStrategy;
+    }
+    return cfg;
+  }, [includeFJ, xAxis, yAxis, pinnedValues, ddStrategy, cachedValueTable, clueStats]);
 
   // --- URL hash sync (write) ---
   useEffect(() => {
@@ -181,6 +277,29 @@ export default function App() {
       .then(r => r.json())
       .then((data: GameData[]) => setGames(data))
       .catch(err => console.warn('Failed to load games.json:', err));
+  }, []);
+
+  // --- E-6: load clue-stats.json (empirical DD row-placement priors) ---
+  // 404/malformed → visible console.warn naming the fallback in use, then
+  // proceed with sim-engine's hardcoded DD_ROW_WEIGHTS (never silent).
+  useEffect(() => {
+    fetch('/clue-stats.json')
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data: ClueStats) => {
+        if (!data?.ddRowWeights?.J?.length || !data?.ddRowWeights?.DJ?.length) {
+          throw new Error('malformed clue-stats.json (missing ddRowWeights.J/DJ)');
+        }
+        setClueStats(data);
+      })
+      .catch(err => {
+        console.warn(
+          'clue-stats.json unavailable or malformed — falling back to the hardcoded DD_ROW_WEIGHTS folklore prior (sim-engine.ts). DD heat strip will stay hidden.',
+          err,
+        );
+      });
   }, []);
 
   // --- Compute dimension values from position ---
@@ -224,13 +343,49 @@ export default function App() {
             yVal: prevSimParamsRef.current.yVal,
             pinnedValues: prevSimParamsRef.current.pinnedValues,
             config: prevSimParamsRef.current.config,
-            simsPerGame: 10,
+            // E-7 All Games recolor: 10 → 25 sims/game (measured timing in
+            // the implementation report — per-square SE ~±16pp → ~±10pp).
+            simsPerGame: 25,
           });
         } else {
           setGameSimProgress(null);
           gameSimStale.current = false;
           simPassRef.current = 'idle';
         }
+      } else if (msg.type === 'buildValueTableProgress') {
+        if (msg.cacheKey === equityBuildKeyRef.current && !equityBuildCancelledRef.current) {
+          setEquityBuildProgress(msg.pct);
+        }
+      } else if (msg.type === 'buildValueTableResult') {
+        // Stale or cancel-dropped result: a newer build superseded this one,
+        // or the user cancelled — never apply/cache it (E-7 UI states:
+        // "cancel reverts selection", not "cancel then silently apply anyway").
+        if (equityBuildCancelledRef.current || msg.cacheKey !== equityBuildKeyRef.current) return;
+        equityBuildingActiveRef.current = false;
+        setValueTableCache(prev => ({ ...prev, [msg.cacheKey]: msg.table }));
+        setEquityBuildStatus('ready');
+        setEquityBuildProgress(1);
+      } else if (msg.type === 'buildValueTableError') {
+        if (equityBuildCancelledRef.current || msg.cacheKey !== equityBuildKeyRef.current) return;
+        equityBuildingActiveRef.current = false;
+        console.warn('V-table build failed — Optimal (equity) unavailable, falling back to Aggressive.', msg.message);
+        setEquityBuildStatus('failed');
+        setDdStrategy('aggressive');
+      }
+    };
+
+    worker.onerror = (ev) => {
+      // Crash defense for an in-flight V-table build (E-2/E-7's documented
+      // rescue): revert to the preset fallback instead of silently wrong
+      // numbers. Other in-flight ops (grid/all-games sims) already have
+      // their own per-consumer error handling (HeatMap's own worker,
+      // simAllGames* messages) — this only needs to cover the persistent
+      // worker's buildValueTable path.
+      if (equityBuildingActiveRef.current) {
+        equityBuildingActiveRef.current = false;
+        console.warn('Persistent worker crashed during V-table build — falling back to Aggressive.', ev);
+        setEquityBuildStatus('failed');
+        setDdStrategy('aggressive');
       }
     };
 
@@ -241,11 +396,58 @@ export default function App() {
     };
   }, [games]);
 
+  // --- E-7: build the V-table (persistent worker) when Optimal is selected ---
+  useEffect(() => {
+    if (ddStrategy !== 'equity') return;
+    if (valueTableCache[currentCacheKey]) {
+      setEquityBuildStatus('ready');
+      return;
+    }
+    const worker = gameWorkerRef.current;
+    if (!worker || !gamesLoadedInWorker.current) return; // retries once the persistent worker exists (effect re-fires on `games`)
+
+    equityBuildCancelledRef.current = false;
+    equityBuildingActiveRef.current = true;
+    equityBuildKeyRef.current = currentCacheKey;
+    setEquityBuildStatus('building');
+    setEquityBuildProgress(0);
+
+    const opponentProfile = interpolateOpponent(
+      pinnedValues.opponentStrength ?? DIMENSIONS.opponentStrength.defaultValue,
+    );
+    worker.postMessage({
+      type: 'buildValueTable',
+      opponentProfile,
+      config: {
+        includeFJ,
+        rhoB: DEFAULT_CONFIG.rhoB,
+        rhoP: DEFAULT_CONFIG.rhoP,
+        ddWagerFraction: pinnedValues.ddAggression ?? DIMENSIONS.ddAggression.defaultValue,
+        fjStrategy: 'standard',
+      },
+      seed: 0xf00d,
+      cacheKey: currentCacheKey,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ddStrategy, currentCacheKey, games]);
+
+  /** E-7: cancel affordance — drops the in-flight build's eventual result
+   *  (still computes in the background worker, just never applied/cached —
+   *  see the buildValueTableResult handler above) and reverts the
+   *  selection, per the plan's UI-states table ("cancel reverts selection"). */
+  const handleCancelEquityBuild = useCallback(() => {
+    equityBuildCancelledRef.current = true;
+    equityBuildingActiveRef.current = false;
+    setEquityBuildStatus('idle');
+    setEquityBuildProgress(0);
+    setDdStrategy('aggressive');
+  }, []);
+
   // --- Trigger all-games sim with debounce ---
   // Mark stale on any parameter change
   useEffect(() => {
     gameSimStale.current = true;
-  }, [position.x, position.y, xAxis, yAxis, includeFJ, pinnedValues]);
+  }, [position.x, position.y, xAxis, yAxis, includeFJ, pinnedValues, ddStrategy, cachedValueTable]);
 
   // Only actually run the sim when on the games tab (or when switching to it)
   useEffect(() => {
@@ -280,7 +482,7 @@ export default function App() {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, position.x, position.y, xAxis, yAxis, includeFJ, pinnedValues]);
+  }, [tab, position.x, position.y, xAxis, yAxis, includeFJ, pinnedValues, ddStrategy, cachedValueTable]);
 
   // --- Handlers ---
 
@@ -440,7 +642,7 @@ export default function App() {
       <main className="app-main">
         {tab === 'your-game' ? (
           <div className="your-game-container">
-            <GameAnalyzer onEstimate={handleGameEstimate} />
+            <GameAnalyzer onEstimate={handleGameEstimate} sharedValueTable={cachedValueTable} />
             <div className="your-game-cta">
               <p>Or jump straight to exploring:</p>
               <button
@@ -493,6 +695,8 @@ export default function App() {
                   config={config}
                   onWinRateUpdate={setWinRate}
                   pulseToken={pulseToken}
+                  equityBuildStatus={ddStrategy === 'equity' ? equityBuildStatus : 'idle'}
+                  equityBuildProgress={equityBuildProgress}
                 />
               </div>
             </div>
@@ -512,6 +716,9 @@ export default function App() {
                   config={config}
                 />
               </div>
+              {/* E-7 DD heat strip: independent of V — driven entirely by
+                  clue-stats.json; hidden entirely when unavailable. */}
+              <DDHeatStrip clueStats={clueStats} />
               <ControlsPanel
                 xAxis={xAxis}
                 yAxis={yAxis}
@@ -521,6 +728,11 @@ export default function App() {
                 onFJChange={setIncludeFJ}
                 theme={theme}
                 onThemeChange={setTheme}
+                ddStrategy={ddStrategy}
+                onDdStrategyChange={setDdStrategy}
+                equityBuildStatus={equityBuildStatus}
+                equityBuildProgress={equityBuildProgress}
+                onCancelEquityBuild={handleCancelEquityBuild}
               />
             </div>
           </>
@@ -548,6 +760,8 @@ export default function App() {
                   onPinnedChange={handlePinnedChange}
                   includeFJ={includeFJ}
                   onFJChange={setIncludeFJ}
+                  ddStrategy={ddStrategy}
+                  equityActive={ddStrategy === 'equity'}
                 />
                 <div className="games-header">
                   <p className="games-subtitle">

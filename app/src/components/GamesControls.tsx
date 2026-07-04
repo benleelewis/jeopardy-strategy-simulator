@@ -1,4 +1,13 @@
 import { DIMENSIONS, getPinnedDimNames, valueToFraction, fractionToValue, type DimensionName } from '../sim/dimensions';
+import type { DDStrategy } from '../sim/sim-engine';
+
+const STRATEGY_LABELS: Record<DDStrategy, string> = {
+  off: 'Off',
+  conservative: 'Conservative',
+  aggressive: 'Aggressive',
+  truedd: 'True DD',
+  equity: 'Optimal (equity)',
+};
 
 interface Props {
   position: { x: number; y: number };
@@ -9,11 +18,19 @@ interface Props {
   onPinnedChange: (name: string, value: number) => void;
   includeFJ: boolean;
   onFJChange: (v: boolean) => void;
+  /** E-7: single source of truth lives in App.tsx / ControlsPanel — this
+   *  tab only REFLECTS the current selection, it doesn't duplicate the
+   *  control. */
+  ddStrategy: DDStrategy;
+  /** While Optimal is active, the FJ checkbox is a cache-key knob shared
+   *  with ControlsPanel's lock treatment (same field, same cache key). */
+  equityActive: boolean;
 }
 
 export function GamesControls({
   position, onPositionChange, xAxis, yAxis,
   pinnedValues, onPinnedChange, includeFJ, onFJChange,
+  ddStrategy, equityActive,
 }: Props) {
   // The dims a player can tune here: the two Explorer axes plus whatever
   // pinned dims apply for that axis pair (P-1) — minus environment dims
@@ -64,14 +81,25 @@ export function GamesControls({
           </label>
         );
       })}
-      <label className="gc-checkbox">
+      <label
+        className="gc-checkbox"
+        style={equityActive ? { opacity: 0.4, cursor: 'default' } : undefined}
+        title={equityActive ? 'Locked while Optimal is active — changing this rebuilds the strategy table (~5s)' : undefined}
+      >
         <input
           type="checkbox"
           checked={includeFJ}
+          disabled={equityActive}
+          aria-disabled={equityActive}
           onChange={e => onFJChange(e.target.checked)}
         />
-        <span>Include FJ</span>
+        <span>{equityActive && <span aria-hidden="true">🔒 </span>}Include FJ</span>
       </label>
+      {/* E-7: read-only reflection of the DD Strategy selector (ControlsPanel
+          is the editable single source, on the Explorer tab). */}
+      <span className="gc-strategy-badge" title="Change on the Explorer tab">
+        DD Strategy: <strong>{STRATEGY_LABELS[ddStrategy]}</strong>
+      </span>
     </div>
   );
 }
