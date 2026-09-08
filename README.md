@@ -5,17 +5,21 @@ knowledge and a given buzzer speed, how often would you win?
 
 I was a contestant on the show. Afterwards I wrote a paper on Daily Double
 wagering, and this is that work rebuilt as something you can use. It simulates
-games, and it does so against opponent profiles taken from 9,064 real games.
+games, and it does so against opponent profiles built from 8,665 real games.
 
 Live app: https://app-beryl-rho-80.vercel.app
 
 ## What you can do with it
 
-**All games.** Every Jeopardy game from season 1 to season 41 is drawn as one
-colored square, arranged by season and air date. The color is how often you
-would win that specific game, against the two people who were actually there.
-You can click a season to open it as a calendar, and click a game to see the
-scores and the simulated result.
+**Your game.** If you have been on the show, enter what you scored and the app
+works out the knowledge and buzzer speed those numbers imply. If you have not,
+there are presets for an average player and a strong player.
+
+**All games.** All 8,665 regular season games from September 1984 to July 2025
+are drawn as one colored square each, arranged by season and air date. The color
+is how often you would win that specific game, against the two people who were
+actually there. You can click a season to open it as a calendar, and click a
+game to see the scores and the simulated result.
 
 **Explorer.** This is a map of win rate over two skills that you choose. You
 drag a marker to your own position and read your win rate off the map. The
@@ -31,7 +35,7 @@ checked into this repository because it is 77 MB when extracted.
 
 | Script | Reads | Writes | What it does |
 | --- | --- | --- | --- |
-| `scripts/build-games.ts` | `scoring_season1-41.tsv` | `app/public/games.json` | Filters out kids, teen, and tournament matches, then infers a knowledge and buzzer speed profile for each of the two opponents in each game. |
+| `scripts/build-games.ts` | `scoring_season1-41.tsv` | `app/public/games.json` | Filters out kids, teen, and tournament matches, which leaves 8,665 games. Then it infers a knowledge and buzzer speed profile for each of the two opponents in each game. |
 | `scripts/build-clue-stats.ts` | `combined_season1-41.tsv`, 529,939 rows | `app/public/clue-stats.json` | Streams the clue level file and derives where Daily Doubles actually appear on the board, and how much people actually wager on them. |
 
 Three things in these scripts are worth pointing at.
