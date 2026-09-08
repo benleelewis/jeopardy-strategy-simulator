@@ -7,7 +7,7 @@ I was a contestant on the show. Afterwards I wrote a paper on Daily Double
 wagering, and this is that work rebuilt as something you can use. It simulates
 games, and it does so against opponent profiles taken from 9,064 real games.
 
-Live app: https://TODO
+Live app: https://app-beryl-rho-80.vercel.app
 
 ## What you can do with it
 
