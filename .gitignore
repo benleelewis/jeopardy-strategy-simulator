@@ -11,3 +11,8 @@ __pycache__
 # External References), extract into data/. scripts/ regenerate app/public/*.json.
 data/
 *.zip
+
+# Third-party papers: read locally, never redistributed from this repo.
+# See README.md > References for where to get them.
+ferrucci2012.pdf
+tesauro2012.pdf

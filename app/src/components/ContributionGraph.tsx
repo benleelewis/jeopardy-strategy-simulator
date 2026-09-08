@@ -82,45 +82,40 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
   const [zoomedSeason, setZoomedSeason] = useState<number | null>(null);
 
-  const seasonMap = useRef<Map<number, number[]>>(new Map());
-  const seasonOrder = useRef<number[]>([]);
+  // Derived from `games`. useMemo rather than refs written in an effect, so the
+  // first paint sees real values instead of the empty initial ref.
+  const seasonMap = useMemo(() => groupBySeason(games), [games]);
+  const seasonOrder = useMemo(
+    () => [...seasonMap.keys()].sort((a, b) => a - b),
+    [seasonMap]
+  );
 
-  // Pre-compute reveal order for animation
-  const revealOrder = useRef<number[]>([]);
-  useEffect(() => {
-    revealOrder.current = shuffleIndices(games.length);
-  }, [games]);
+  // Pre-computed reveal order for the fill-in animation
+  const revealOrder = useMemo(() => shuffleIndices(games.length), [games]);
 
   // Build revealed set from progress
   const revealedSet = useMemo(() => {
     if (progress === null || !winRates) return null; // show all when done
     const count = Math.floor(progress * games.length);
-    return new Set(revealOrder.current.slice(0, count));
-  }, [progress, games.length, winRates]);
+    return new Set(revealOrder.slice(0, count));
+  }, [progress, games.length, winRates, revealOrder]);
 
-  // Build season map once
-  useEffect(() => {
-    seasonMap.current = groupBySeason(games);
-    seasonOrder.current = [...seasonMap.current.keys()].sort((a, b) => a - b);
-  }, [games]);
-
-  // Find max columns
-  const maxCols = useRef(0);
-  useEffect(() => {
+  // Widest season, in games — sets the canvas column count
+  const maxCols = useMemo(() => {
     let m = 0;
-    for (const indices of seasonMap.current.values()) {
+    for (const indices of seasonMap.values()) {
       m = Math.max(m, indices.length);
     }
-    maxCols.current = m;
-  }, [games]);
+    return m;
+  }, [seasonMap]);
 
   // Zoomed calendar grid
   const zoomGrid = useMemo(() => {
     if (zoomedSeason === null) return null;
-    const indices = seasonMap.current.get(zoomedSeason);
+    const indices = seasonMap.get(zoomedSeason);
     if (!indices) return null;
     return buildCalendarGrid(games, indices);
-  }, [zoomedSeason, games]);
+  }, [zoomedSeason, games, seasonMap]);
 
   // Read CSS color variables
   const getColors = useCallback((canvas: HTMLCanvasElement) => {
@@ -164,8 +159,8 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const rows = seasonOrder.current.length;
-    const cols = maxCols.current;
+    const rows = seasonOrder.length;
+    const cols = maxCols;
     const width = LABEL_WIDTH + cols * CELL_STEP;
     const height = TOP_PAD + rows * ROW_STEP;
 
@@ -187,8 +182,8 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
     ctx.textBaseline = 'middle';
 
     for (let r = 0; r < rows; r++) {
-      const season = seasonOrder.current[r];
-      const indices = seasonMap.current.get(season) || [];
+      const season = seasonOrder[r];
+      const indices = seasonMap.get(season) || [];
       const y = TOP_PAD + r * ROW_STEP;
 
       // Season label (clickable area)
@@ -203,7 +198,7 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
         ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
       }
     }
-  }, [games, winRates, hoveredGame, zoomedSeason, getColors, getCellColor]);
+  }, [games, winRates, hoveredGame, zoomedSeason, getColors, getCellColor, seasonOrder, seasonMap, maxCols]);
 
   // Draw canvas — zoomed season view
   useEffect(() => {
@@ -287,19 +282,19 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
     const col = Math.floor((x - LABEL_WIDTH) / CELL_STEP);
     const row = Math.floor((y - TOP_PAD) / ROW_STEP);
 
-    if (row < 0 || row >= seasonOrder.current.length) return { gi: null, seasonClick: null };
+    if (row < 0 || row >= seasonOrder.length) return { gi: null, seasonClick: null };
 
     // Click on season label area?
     if (x < LABEL_WIDTH) {
-      return { gi: null, seasonClick: seasonOrder.current[row] };
+      return { gi: null, seasonClick: seasonOrder[row] };
     }
 
     if (col < 0) return { gi: null, seasonClick: null };
-    const season = seasonOrder.current[row];
-    const indices = seasonMap.current.get(season);
+    const season = seasonOrder[row];
+    const indices = seasonMap.get(season);
     if (!indices || col >= indices.length) return { gi: null, seasonClick: null };
     return { gi: indices[col], seasonClick: null };
-  }, [zoomedSeason, zoomGrid]);
+  }, [zoomedSeason, zoomGrid, seasonOrder, seasonMap]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const { gi } = hitTest(e.clientX, e.clientY);
