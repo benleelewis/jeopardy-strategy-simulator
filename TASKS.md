@@ -16,7 +16,7 @@
 - [x] P-2: dash-pattern contour confidence + refined pass 300→450 games/cell
 - [x] P-3: journey bridge (marker pulse + link to All Games)
 - [x] P-4: YourNumber above GamesControls
-- [ ] Deploy to Vercel (blocked: needs `vercel login` — Ben)
+- [x] Deploy to Vercel — live at https://app-beryl-rho-80.vercel.app
 - [ ] **C1 checkpoint**: Ben re-rates the Explorer on the deployed app (target ≥7/10)
 - [ ] Polish: heat map title overlaps top axis label (smoke-test finding)
 
