@@ -20,7 +20,9 @@
   --cg-3: #1a3ba8;
   --cg-4: #c5a028;
   --cg-5: #f5d442;
-  --cg-empty: #0a0e3d;
+  /* Not simulated yet. Deliberately neutral: the win-rate ramp is navy through
+     gold, so a grey cannot be mistaken for a low win rate. */
+  --cg-empty: #d4d7dd;
 
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
@@ -48,7 +50,7 @@
   --cg-3: #4a4acc;
   --cg-4: #c5a028;
   --cg-5: #f5d442;
-  --cg-empty: #12127a;
+  --cg-empty: #7c83a0;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -66,7 +68,7 @@
     --cg-3: #1a3ba8;
     --cg-4: #c5a028;
     --cg-5: #f5d442;
-    --cg-empty: #161b22;
+    --cg-empty: #3a4150;
   }
 }
 

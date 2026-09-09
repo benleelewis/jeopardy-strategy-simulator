@@ -129,7 +129,7 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
       cg3: get('--cg-3', '#1a3ba8'),
       cg4: get('--cg-4', '#c5a028'),
       cg5: get('--cg-5', '#f5d442'),
-      cgEmpty: get('--cg-empty', '#0a0e3d'),
+      cgEmpty: get('--cg-empty', '#d4d7dd'),
     };
   }, []);
 
