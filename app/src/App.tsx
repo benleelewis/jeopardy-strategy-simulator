@@ -163,7 +163,9 @@ export default function App() {
   });
   const [includeFJ, setIncludeFJ] = useState(initial?.fj ?? true);
   const [theme, setTheme] = useState<'clean' | 'jeopardy'>(initial?.theme ?? 'clean');
-  const [tab, setTab] = useState<AppState['tab']>(initial?.tab ?? 'your-game');
+  // Landing tab is All Games: it is the one view that reads on its own, with
+  // no numbers to type in first. Your Game and Explorer are opt-in from there.
+  const [tab, setTab] = useState<AppState['tab']>(initial?.tab ?? 'games');
 
   // P-3 journey bridge: bumped on each GameAnalyzer submit → the Explorer
   // YOU marker pulses once; the bridge link to All Games appears.
@@ -619,10 +621,10 @@ export default function App() {
         <h1>Jeopardy Strategy Simulator</h1>
         <div className="tabs">
           <button
-            className={`tab ${tab === 'your-game' ? 'tab-active' : ''}`}
-            onClick={() => setTab('your-game')}
+            className={`tab ${tab === 'games' ? 'tab-active' : ''}`}
+            onClick={() => setTab('games')}
           >
-            Your Game
+            All Games {games ? `(${games.length.toLocaleString()})` : ''}
           </button>
           <button
             className={`tab ${tab === 'explorer' ? 'tab-active' : ''}`}
@@ -631,10 +633,10 @@ export default function App() {
             Explorer
           </button>
           <button
-            className={`tab ${tab === 'games' ? 'tab-active' : ''}`}
-            onClick={() => setTab('games')}
+            className={`tab ${tab === 'your-game' ? 'tab-active' : ''}`}
+            onClick={() => setTab('your-game')}
           >
-            All Games {games ? `(${games.length.toLocaleString()})` : ''}
+            Your Game
           </button>
         </div>
       </header>

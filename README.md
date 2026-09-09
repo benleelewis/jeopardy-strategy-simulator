@@ -11,21 +11,21 @@ Live app: https://jeopardy-strategy-simulator.vercel.app
 
 ## What you can do with it
 
-**Your game.** If you have been on the show, enter what you scored and the app
-works out the knowledge and buzzer speed those numbers imply. If you have not,
-there are presets for an average player and a strong player.
-
-**All games.** All 8,665 regular season games from September 1984 to July 2025
-are drawn as one colored square each, arranged by season and air date. The color
-is how often you would win that specific game, against the two people who were
-actually there. You can click a season to open it as a calendar, and click a
-game to see the scores and the simulated result.
+**All games.** This is the view the app opens on. All 8,665 regular season games
+from September 1984 to July 2025 are drawn as one colored square each, arranged
+by season and air date. The color is how often you would win that specific game,
+against the two people who were actually there. You can click a season to open
+it as a calendar, and click a game to see the scores and the simulated result.
 
 **Explorer.** This is a map of win rate over two skills that you choose. You
 drag a marker to your own position and read your win rate off the map. The
 markers for Ken Jennings, James Holzhauer, Brad Rutter, Amy Schneider, and
 Watson are placed from their published statistics, so you can see where you sit
 relative to them.
+
+**Your game.** If you have been on the show, enter what you scored and the app
+works out the knowledge and buzzer speed those numbers imply. If you have not,
+there are presets for an average player and a strong player.
 
 ## The data pipeline
 
@@ -105,6 +105,8 @@ npx tsx scripts/build-clue-stats.ts
 - `scripts/` holds the data pipeline and the offline analysis tools.
 - `PLAN.md` and `TASKS.md` record what was built and why.
 - `BRAINSTORM.md` records the research the design came from.
+- `archive/` holds the earlier prototypes and handoff notes. Nothing in the app
+  or the scripts uses them.
 
 ## How this was built
 
