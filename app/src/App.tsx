@@ -176,6 +176,10 @@ export default function App() {
   // pass. Default 'normal' (450) reproduces the pre-existing hardcoded
   // behavior/timing exactly.
   const [refinedSpeed, setRefinedSpeed] = useState<RefinedSpeed>(initial?.refinedSpeed ?? 'normal');
+  // P2 "DD impact difference map overlay" (TODOS.md). Off by default, not
+  // persisted in the URL hash (a per-session viewing toggle, not a
+  // strategy/knob choice).
+  const [showDDImpact, setShowDDImpact] = useState(false);
   // Landing tab is All Games: it is the one view that reads on its own, with
   // no numbers to type in first. Your Game and Explorer are opt-in from there.
   const [tab, setTab] = useState<AppState['tab']>(initial?.tab ?? 'games');
@@ -714,6 +718,7 @@ export default function App() {
                   equityBuildStatus={ddStrategy === 'equity' ? equityBuildStatus : 'idle'}
                   equityBuildProgress={equityBuildProgress}
                   refinedGamesPerCell={REFINED_GAMES_PER_CELL[refinedSpeed]}
+                  showDDImpact={showDDImpact}
                 />
               </div>
             </div>
@@ -752,6 +757,8 @@ export default function App() {
                 onCancelEquityBuild={handleCancelEquityBuild}
                 refinedSpeed={refinedSpeed}
                 onRefinedSpeedChange={setRefinedSpeed}
+                showDDImpact={showDDImpact}
+                onShowDDImpactChange={setShowDDImpact}
               />
             </div>
           </>

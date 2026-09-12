@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
 import * as d3 from 'd3';
 import type { SimConfig } from '../sim/sim-engine';
-import type { GridCell } from '../sim/sim-worker';
+import type { GridCell, DDImpactCell } from '../sim/sim-worker';
 import { FAMOUS_PLAYERS } from '../sim/opponent-models';
 import {
   DIMENSIONS,
@@ -37,7 +37,20 @@ interface Props {
    *  refined-pass count, so omitting this prop reproduces today's exact
    *  behavior/timing. */
   refinedGamesPerCell?: number;
+  /** P2 "DD impact difference map overlay" (TODOS.md): when true, cells
+   *  show (winRate under the current DD strategy) − (winRate under DD
+   *  strategy 'off') on a diverging blue/gold scale instead of the normal
+   *  win-rate coloring, with contour lines hidden and its own legend. Off
+   *  by default — the default (off) rendering is unaffected. */
+  showDDImpact?: boolean;
 }
+
+/** P2 DD impact overlay diverging scale: negative (current strategy loses
+ *  win rate vs. never using a DD strategy) = blue, zero = neutral, positive
+ *  = gold — the app's Jeopardy blue/gold palette (see index.css `.jeopardy`
+ *  theme's --bg/--accent). Domain is set per-render from the data's own
+ *  max magnitude (see the render effect), so this is range-only. */
+const DD_IMPACT_COLOR_RANGE: [string, string, string] = ['#1a4fd6', '#f2f2f2', '#d4af37'];
 
 const WIDTH = 560;
 const HEIGHT = 560;
@@ -61,6 +74,7 @@ export function HeatMap({
   equityBuildStatus = 'idle',
   equityBuildProgress = 0,
   refinedGamesPerCell = 450,
+  showDDImpact = false,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -68,6 +82,12 @@ export function HeatMap({
   const [resolution, setResolution] = useState(20);
   const [computing, setComputing] = useState(false);
   const [progress, setProgress] = useState(0);
+  // P2 DD impact overlay state — a dedicated worker (see the lifecycle
+  // effect below) computes this independently of the main grid above.
+  const ddImpactWorkerRef = useRef<Worker | null>(null);
+  const [diffGrid, setDiffGrid] = useState<DDImpactCell[]>([]);
+  const [diffComputing, setDiffComputing] = useState(false);
+  const [diffProgress, setDiffProgress] = useState(0);
   const [stale, setStale] = useState(false); // true when axes changed but grid hasn't arrived yet
   // P-3: single-shot pulse on the YOU marker when the GameAnalyzer bridge
   // lands here. Rendered as a one-iteration CSS animation (see .you-pulse
@@ -177,6 +197,77 @@ export function HeatMap({
       setResolution(40);
     }
   }, [grid, resolution, computing, refinedGamesPerCell]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // P2 DD impact overlay: worker lifecycle. A SEPARATE worker from the main
+  // `workerRef` above so this feature's 'cancel' messages never cross-talk
+  // with the primary grid's in-flight computation — each Worker instance
+  // gets its own module-scoped `cancelled` flag in sim-worker.ts. Created
+  // lazily only once the toggle is on; torn down (and diff state cleared)
+  // when it's off, so the default (off) path never spins up this worker or
+  // touches diff state at all.
+  useEffect(() => {
+    if (!showDDImpact) {
+      setDiffGrid([]);
+      setDiffComputing(false);
+      setDiffProgress(0);
+      return;
+    }
+
+    const worker = new Worker(
+      new URL('../sim/sim-worker.ts', import.meta.url),
+      { type: 'module' },
+    );
+
+    worker.onmessage = (e) => {
+      const msg = e.data;
+      if (msg.type === 'ddImpactProgress') {
+        setDiffProgress(msg.pct);
+      } else if (msg.type === 'ddImpactGridResult') {
+        setDiffGrid(msg.grid);
+        setDiffComputing(false);
+        setDiffProgress(1);
+      } else if (msg.type === 'error') {
+        setDiffComputing(false);
+        console.warn('DD impact worker error:', msg.message);
+      }
+    };
+
+    worker.onerror = () => {
+      setDiffComputing(false);
+      console.warn('DD impact worker crashed');
+    };
+
+    ddImpactWorkerRef.current = worker;
+    return () => {
+      worker.terminate();
+      ddImpactWorkerRef.current = null;
+    };
+  }, [showDDImpact]);
+
+  // P2 DD impact overlay: trigger computation. Piggybacks on the primary
+  // grid's own `resolution` state (20 fast / 40 refined) and matching
+  // gamesPerCell, so the overlay automatically follows the same
+  // fast→refined progression the main grid already does, without a
+  // separate adaptive-resolution mechanism.
+  useEffect(() => {
+    if (!showDDImpact) return;
+    const worker = ddImpactWorkerRef.current;
+    if (!worker || grid.length === 0) return;
+
+    const gamesPerCell = resolution === 20 ? 150 : refinedGamesPerCell;
+    setDiffComputing(true);
+    setDiffProgress(0);
+    worker.postMessage({ type: 'cancel' });
+    worker.postMessage({
+      type: 'computeDDImpactGrid',
+      resolution,
+      xAxis,
+      yAxis,
+      pinnedValues,
+      config,
+      gamesPerCell,
+    });
+  }, [showDDImpact, resolution, xAxis, yAxis, pinnedValues, config, refinedGamesPerCell, grid.length]);
 
   // P-3: fire the one-shot pulse whenever the bridge token bumps.
   useEffect(() => {
@@ -290,6 +381,32 @@ export function HeatMap({
     }
     const smoothedValues = gaussianBlur2D(rawValues, res + 1, res + 1, 2);
 
+    // P2 DD impact overlay: only engages once a diff grid matching the
+    // CURRENT resolution has arrived — while stale/still computing, the
+    // normal win-rate cells below keep rendering (never blank).
+    const diffReady = showDDImpact && diffGrid.length === grid.length;
+    let smoothedDiffValues: number[] | null = null;
+    let diffColorScale: d3.ScaleLinear<string, string> | null = null;
+    if (diffReady) {
+      const rawDiff: number[] = new Array((res + 1) * (res + 1)).fill(0);
+      for (const cell of diffGrid) {
+        const xi = Math.round(cell.x * res);
+        const yi = Math.round(cell.y * res);
+        if (xi <= res && yi <= res) {
+          rawDiff[yi * (res + 1) + xi] = cell.diff;
+        }
+      }
+      smoothedDiffValues = gaussianBlur2D(rawDiff, res + 1, res + 1, 2);
+      let maxAbsDiff = 0.01; // floor avoids a degenerate zero-width domain
+      for (const v of smoothedDiffValues) {
+        if (Math.abs(v) > maxAbsDiff) maxAbsDiff = Math.abs(v);
+      }
+      diffColorScale = d3.scaleLinear<string>()
+        .domain([-maxAbsDiff, 0, maxAbsDiff])
+        .range(DD_IMPACT_COLOR_RANGE)
+        .clamp(true);
+    }
+
     // Draw cells
     g.selectAll('rect.cell')
       .data(grid)
@@ -299,7 +416,9 @@ export function HeatMap({
       .attr('y', d => yScale(d.y) - cellH)
       .attr('width', cellW + 1)
       .attr('height', cellH + 1)
-      .attr('fill', (_, i) => colorScale(smoothedValues[i] ?? 0))
+      .attr('fill', (_, i) => (diffReady && smoothedDiffValues && diffColorScale)
+        ? diffColorScale(smoothedDiffValues[i] ?? 0)
+        : colorScale(smoothedValues[i] ?? 0))
       .attr('opacity', 0.85);
 
     // P-2 contour confidence: dash pattern keyed off refinement stage.
@@ -310,8 +429,9 @@ export function HeatMap({
     // on a win-rate color field read as "low value here."
     const isFastPass = res <= 20;
 
-    // Contour lines
-    if (grid.length > 100) {
+    // Contour lines — hidden entirely while the DD impact overlay is on
+    // (P2 spec: "with ... the contour lines hidden").
+    if (grid.length > 100 && !showDDImpact) {
       const contourRes = res + 1;
       const raw: number[] = new Array(contourRes * contourRes).fill(0);
       for (const cell of grid) {
@@ -521,7 +641,7 @@ export function HeatMap({
 
     // Axis styling
     g.selectAll('.domain, .tick line').attr('stroke', 'var(--border)');
-  }, [grid, xAxis, yAxis, stale, equityBuildStatus]);
+  }, [grid, xAxis, yAxis, stale, equityBuildStatus, showDDImpact, diffGrid]);
 
   // ── Effect: Update marker position ──
   useEffect(() => {
@@ -535,6 +655,14 @@ export function HeatMap({
 
   const xDim = DIMENSIONS[xAxis];
   const yDim = DIMENSIONS[yAxis];
+
+  // P2 DD impact overlay legend caption — same floor as the render
+  // effect's color-scale domain, computed independently here (over raw,
+  // unsmoothed values) since this is plain JSX, not the d3 effect.
+  let diffMaxAbs = 0.01;
+  for (const cell of diffGrid) {
+    if (Math.abs(cell.diff) > diffMaxAbs) diffMaxAbs = Math.abs(cell.diff);
+  }
 
   return (
     <div style={{ position: 'relative', display: 'inline-block' }}>
@@ -694,11 +822,35 @@ export function HeatMap({
         </div>
       )}
 
-      {/* P-2 legend: contour confidence encoding */}
-      {grid.length > 100 && (
-        <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px', marginTop: 4 }}>
-          dashed contour = fewer samples
+      {/* P2 DD impact overlay legend — replaces the contour-confidence
+          legend (contour lines are hidden while this is on, see the
+          render effect above). */}
+      {showDDImpact ? (
+        <div style={{ textAlign: 'center', marginTop: 4 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '11px', color: 'var(--text-muted)' }}>
+            <span>−{(diffMaxAbs * 100).toFixed(0)}pp</span>
+            <div
+              aria-hidden="true"
+              style={{
+                width: 120,
+                height: 10,
+                borderRadius: 5,
+                background: `linear-gradient(to right, ${DD_IMPACT_COLOR_RANGE[0]}, ${DD_IMPACT_COLOR_RANGE[1]}, ${DD_IMPACT_COLOR_RANGE[2]})`,
+              }}
+            />
+            <span>+{(diffMaxAbs * 100).toFixed(0)}pp</span>
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: 2 }}>
+            DD impact: current strategy − DD off
+            {diffComputing && ` (computing… ${Math.round(diffProgress * 100)}%)`}
+          </div>
         </div>
+      ) : (
+        grid.length > 100 && (
+          <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '12px', marginTop: 4 }}>
+            dashed contour = fewer samples
+          </div>
+        )
       )}
 
       {computing && (

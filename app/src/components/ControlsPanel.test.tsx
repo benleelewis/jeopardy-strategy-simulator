@@ -26,6 +26,8 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof ControlsPanel>
     onCancelEquityBuild: vi.fn(),
     refinedSpeed: 'normal' as const,
     onRefinedSpeedChange: vi.fn(),
+    showDDImpact: false,
+    onShowDDImpactChange: vi.fn(),
     ...overrides,
   };
 }
@@ -169,5 +171,26 @@ describe('ControlsPanel — Speed vs Accuracy (P-1C)', () => {
     rerender(<ControlsPanel {...baseProps({ refinedSpeed: 'precise' })} />);
     expect(screen.getByRole('button', { name: 'Precise' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByText('1,200 games/cell on the refined pass')).toBeInTheDocument();
+  });
+});
+
+describe('ControlsPanel — Show DD impact (P2 TODOS.md)', () => {
+  it('is unchecked by default', () => {
+    render(<ControlsPanel {...baseProps({ showDDImpact: false })} />);
+    expect(screen.getByRole('checkbox', { name: 'Show DD impact' })).not.toBeChecked();
+  });
+
+  it('reflects a checked state', () => {
+    render(<ControlsPanel {...baseProps({ showDDImpact: true })} />);
+    expect(screen.getByRole('checkbox', { name: 'Show DD impact' })).toBeChecked();
+  });
+
+  it('calls onShowDDImpactChange when toggled', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<ControlsPanel {...baseProps({ showDDImpact: false, onShowDDImpactChange: onChange })} />);
+
+    await user.click(screen.getByRole('checkbox', { name: 'Show DD impact' }));
+    expect(onChange).toHaveBeenCalledWith(true);
   });
 });

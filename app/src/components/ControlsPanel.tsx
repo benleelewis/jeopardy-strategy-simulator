@@ -29,6 +29,9 @@ interface Props {
   onCancelEquityBuild: () => void;
   refinedSpeed: RefinedSpeed;
   onRefinedSpeedChange: (s: RefinedSpeed) => void;
+  /** P2 "DD impact difference map overlay" (TODOS.md). Off by default. */
+  showDDImpact: boolean;
+  onShowDDImpactChange: (v: boolean) => void;
 }
 
 const sectionStyle: React.CSSProperties = {
@@ -68,6 +71,7 @@ export function ControlsPanel({
   ddStrategy, onDdStrategyChange,
   equityBuildStatus, equityBuildProgress, onCancelEquityBuild,
   refinedSpeed, onRefinedSpeedChange,
+  showDDImpact, onShowDDImpactChange,
 }: Props) {
   // Pinned dimensions for the current axis pair (P-1: several dims write
   // the same Player fields, so only the dims that actually apply for these
@@ -114,6 +118,14 @@ export function ControlsPanel({
           buildProgress={equityBuildProgress}
           onCancel={onCancelEquityBuild}
         />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, cursor: 'pointer', fontSize: '13px', color: 'var(--text)' }}>
+          <input
+            type="checkbox"
+            checked={showDDImpact}
+            onChange={(e) => onShowDDImpactChange(e.target.checked)}
+          />
+          Show DD impact
+        </label>
       </div>
 
       <div style={{ ...sectionStyle, fontWeight: 600, fontSize: '14px', color: 'var(--text-h)' }}>
