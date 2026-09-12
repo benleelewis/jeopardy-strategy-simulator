@@ -1595,4 +1595,34 @@ describe('sim-engine', () => {
       expect(prod.seek - prod.def).toBeGreaterThan(0);
     }, 120000);
   });
+  describe("'squareSelection' dimension (Explorer axis candidate)", () => {
+    it('is registered with the registry shape: two-valued strategy, default 0 = top-down', () => {
+      const dim = DIMENSIONS.squareSelection;
+      expect(dim.type).toBe('strategy');
+      expect(dim.range).toEqual([0, 1]);
+      expect(dim.defaultValue).toBe(0);
+      expect(dim.format(0)).toBe('Top-down');
+      expect(dim.format(1)).toBe('DD seeking');
+      expect(dim.toParams(0, {}).sim?.squareSelection).toBe('default');
+      expect(dim.toParams(0.49, {}).sim?.squareSelection).toBe('default');
+      expect(dim.toParams(0.5, {}).sim?.squareSelection).toBe('ddSeek');
+      expect(dim.toParams(1, {}).sim?.squareSelection).toBe('ddSeek');
+    });
+
+    it('as a swept axis it sets config.squareSelection; left unpinned it stays inert (legacy path)', () => {
+      const seek = buildSimParams('squareSelection', 'buzzerSpeed', 1, 0.6, {});
+      expect(seek.config.squareSelection).toBe('ddSeek');
+      expect(resolveBoardControl(seek.config)).toBe('tracked');
+
+      const top = buildSimParams('squareSelection', 'buzzerSpeed', 0, 0.6, {});
+      expect(top.config.squareSelection).toBe('default');
+      expect(resolveBoardControl(top.config)).toBe('leader');
+
+      // Not an axis and not in any preset's pinned set ⇒ never applied, so
+      // every existing sweep keeps the regression-locked legacy order.
+      const legacy = buildSimParams('knowledge', 'buzzerSpeed', 0.4, 0.6, { squareSelection: 1 });
+      expect(legacy.config.squareSelection).toBeUndefined();
+      expect(resolveBoardControl(legacy.config)).toBe('leader');
+    });
+  });
 });

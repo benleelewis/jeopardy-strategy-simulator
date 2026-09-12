@@ -40,7 +40,8 @@ export type DimensionName =
   | 'precision'
   | 'buzzRaceWinPct'
   | 'buzzAttemptRate'
-  | 'expectedCoryat';
+  | 'expectedCoryat'
+  | 'squareSelection';
 
 // ─── Formatters ────────────────────────────────────────────────────
 
@@ -358,6 +359,23 @@ export const DIMENSIONS: Record<DimensionName, DimensionConfig> = {
       const p = clamp(coryat / (CORYAT_SCALE * Math.max(b, 0.05)), 0, 0.98);
       return { player: { p } };
     },
+  },
+  squareSelection: {
+    name: 'squareSelection',
+    label: 'Square Selection (DD seeking)',
+    type: 'strategy',
+    // A two-valued strategy on the registry's numeric axis shape: values
+    // below 0.5 play top-down ('default'), 0.5 and above hunt Daily
+    // Doubles ('ddSeek', Tesauro 2012's p_DD + 0.1·p_RC rule). Swept as
+    // an axis it renders as two bands; pinned it is a toggle. Default 0
+    // keeps every existing sweep on the regression-locked 'default' order.
+    // Not in any preset's pinnedDims, so it applies only when explicitly
+    // chosen as an axis (buildSimParams ignores inactive pinned dims).
+    range: [0, 1],
+    defaultValue: 0,
+    unit: '',
+    format: (v) => (v >= 0.5 ? 'DD seeking' : 'Top-down'),
+    toParams: (v) => ({ sim: { squareSelection: v >= 0.5 ? 'ddSeek' : 'default' } }),
   },
 };
 
