@@ -153,6 +153,34 @@ export interface DDEvent {
   correct: boolean;
   scoreBefore: number;
   scoreAfter: number;
+  /**
+   * Face value of the clue this Daily Double replaced (TODOS "P2 — GameDetail
+   * DD event rows"). Optional: existing callers/tests that only asserted on
+   * the fields above are unaffected.
+   */
+  clueValue?: number;
+  /**
+   * All three players' scores immediately before this DD was wagered — the
+   * full score-state `equityWager` needs (its `scores` param), not just the
+   * controller's own score. Index 0 is always "you", matching every other
+   * `scores` tuple in this file. Optional/additive.
+   */
+  scoresBefore?: [number, number, number];
+  /**
+   * Clues remaining in the CURRENT round's clue list after this one — the
+   * exact same quantity `simulateRound`'s equity dispatch passes as
+   * `equityWager`'s `cluesRemainingAfter` argument, so a caller recomputing
+   * an equity-optimal wager outside the engine (GameDetail) uses an
+   * identical clues-remaining semantic. Optional/additive.
+   */
+  cluesRemainingAfter?: number;
+  /**
+   * Difficulty-adjusted precision (`player.p * difficultyMultiplier`) used as
+   * `equityWager`'s `pCorrect` at this DD. Optional/additive — lets a caller
+   * recompute what an equity-optimal wager would have been for this exact
+   * event without re-deriving the difficulty scaling itself.
+   */
+  adjustedP?: number;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -553,6 +581,8 @@ export function simulateRound(
 
       const correct = rng() < adjustedP;
       const scoreBefore = scores[controller];
+      // Full 3-player snapshot before mutation — see DDEvent.scoresBefore doc.
+      const scoresBeforeSnapshot: [number, number, number] = [...scores] as [number, number, number];
 
       if (correct) {
         scores[controller] += wager;
@@ -568,6 +598,13 @@ export function simulateRound(
         correct,
         scoreBefore,
         scoreAfter: scores[controller],
+        clueValue: value,
+        scoresBefore: scoresBeforeSnapshot,
+        // Same quantity fed to equityWager's cluesRemainingAfter just above
+        // (clues.slice(i + 1).length) — kept consistent for GameDetail's
+        // out-of-engine recomputation.
+        cluesRemainingAfter: clues.length - i - 1,
+        adjustedP,
       });
     } else {
       // Regular clue

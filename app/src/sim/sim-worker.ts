@@ -23,6 +23,14 @@
  *   OUT: { type: 'buildValueTableResult', table, cacheKey }  (table.data is a
  *        transferred Float32Array — see the persistent-worker postMessage call)
  *   OUT: { type: 'buildValueTableError', message, cacheKey }
+ *
+ *   IN:  { type: 'simulateGameDetail', gameIndex, xAxis, yAxis, xVal, yVal,
+ *          pinnedValues, config, seed }
+ *        Runs ONE seeded simulateGame with trackHistory:true (TODOS
+ *        "P2 — GameDetail DD event rows") — additive, does not touch
+ *        simSingleGameDetail's existing unseeded numSims path above.
+ *   OUT: { type: 'simulateGameDetailResult', gameIndex, ddEvents, scores,
+ *          winner, you: { knowledge, buzzerSpeed } }
  */
 
 import {
@@ -287,6 +295,53 @@ self.onmessage = (e: MessageEvent) => {
     }
 
     self.postMessage({ type: 'simSingleGameDetailResult', gameIndex, results });
+  }
+
+  if (msg.type === 'simulateGameDetail') {
+    // TODOS "P2 — GameDetail DD event rows": ONE seeded, history-tracked
+    // simulation of a historical game, so the DD events (and their
+    // equity-recomputation fields — see DDEvent in sim-engine.ts) are
+    // reproducible across re-clicks of the same game. Additive-only: does
+    // not alter simSingleGameDetail above.
+    const {
+      gameIndex,
+      xAxis = 'knowledge',
+      yAxis = 'buzzerSpeed',
+      xVal,
+      yVal,
+      pinnedValues = {},
+      seed = 0xD00D,
+    } = msg;
+    const games = storedGames;
+    if (!games || !games[gameIndex]) {
+      self.postMessage({ type: 'error', message: 'Game not found' });
+      return;
+    }
+    const config = msg.config ?? DEFAULT_CONFIG;
+
+    const { player, config: cellConfig } = buildSimParams(
+      xAxis as DimensionName,
+      yAxis as DimensionName,
+      xVal,
+      yVal,
+      { ...pinnedValues, ...configToPinned(config) },
+    );
+    const mergedConfig: SimConfig = resolveDDStrategy(config, cellConfig, xAxis, yAxis);
+
+    const game = games[gameIndex];
+    const rng = mulberry32(seed);
+    const opp1 = sampleOpponent(calibrateOpponent(game.o[0]), rng);
+    const opp2 = sampleOpponent(calibrateOpponent(game.o[1]), rng);
+    const result = simulateGame(player, opp1, opp2, mergedConfig, true, rng);
+
+    self.postMessage({
+      type: 'simulateGameDetailResult',
+      gameIndex,
+      ddEvents: result.ddEvents ?? [],
+      scores: result.scores,
+      winner: result.winner,
+      you: { knowledge: player.b * player.p, buzzerSpeed: player.buzzerSpeed },
+    });
   }
 };
 

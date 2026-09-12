@@ -3,7 +3,7 @@ import { HeatMap } from './components/HeatMap';
 import { ControlsPanel } from './components/ControlsPanel';
 import { StatsPanel } from './components/StatsPanel';
 import { ContributionGraph, type GameData } from './components/ContributionGraph';
-import { GameDetail, type SimRun } from './components/GameDetail';
+import { GameDetail, type SimRun, type DDGameDetail } from './components/GameDetail';
 import { GamesControls } from './components/GamesControls';
 import { YourNumber } from './components/YourNumber';
 import { MarginalReturns } from './components/MarginalReturns';
@@ -197,6 +197,10 @@ export default function App() {
   const [gameSimProgress, setGameSimProgress] = useState<number | null>(null);
   const [selectedGame, setSelectedGame] = useState<number | null>(null);
   const [singleGameResults, setSingleGameResults] = useState<SimRun[] | null>(null);
+  // TODOS "P2 — GameDetail DD event rows": one seeded, history-tracked sim's
+  // DD events for the currently selected game (additive to the existing
+  // unseeded singleGameResults path above).
+  const [ddGameDetail, setDdGameDetail] = useState<DDGameDetail | null>(null);
 
   // Persistent worker for all-games simulation (avoids re-serializing 1MB games array)
   const gameWorkerRef = useRef<Worker | null>(null);
@@ -328,6 +332,8 @@ export default function App() {
       const msg = e.data;
       if (msg.type === 'simSingleGameDetailResult') {
         setSingleGameResults(msg.results);
+      } else if (msg.type === 'simulateGameDetailResult') {
+        setDdGameDetail({ gameIndex: msg.gameIndex, ddEvents: msg.ddEvents, you: msg.you });
       } else if (msg.type === 'simAllGamesProgress') {
         setGameSimProgress(msg.pct);
       } else if (msg.type === 'simAllGamesResult') {
@@ -560,6 +566,7 @@ export default function App() {
   const handleGameClick = useCallback((index: number) => {
     setSelectedGame(index);
     setSingleGameResults(null); // clear previous results
+    setDdGameDetail(null); // clear previous DD events (TODOS item)
 
     // Run single-game detail sim
     const worker = gameWorkerRef.current;
@@ -574,6 +581,20 @@ export default function App() {
         pinnedValues,
         config,
         numSims: 10,
+      });
+      // TODOS "P2 — GameDetail DD event rows": one seeded, history-tracked
+      // sim for the DD events section — a distinct message from
+      // simSingleGameDetail above (additive, doesn't touch its payload).
+      worker.postMessage({
+        type: 'simulateGameDetail',
+        gameIndex: index,
+        xAxis,
+        yAxis,
+        xVal,
+        yVal,
+        pinnedValues,
+        config,
+        seed: 0xD00D + index,
       });
     }
   }, [xAxis, yAxis, xVal, yVal, pinnedValues, config]);
@@ -803,6 +824,8 @@ export default function App() {
                         winRate={gameWinRates?.[selectedGame]}
                         onClose={() => setSelectedGame(null)}
                         simResults={singleGameResults}
+                        ddDetail={ddGameDetail}
+                        valueTable={cachedValueTable}
                       />
                     </div>
                   )}
