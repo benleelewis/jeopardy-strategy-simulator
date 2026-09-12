@@ -17,9 +17,13 @@ import {
   computeFJWagersStandard,
   fjEquityGridSearch,
   buildFullBoard,
+  createRoundBoard,
+  chooseSquare,
   resolveBoardControl,
   lowestScoreIndex,
+  DD_SEEK_RETAIN_CONTROL_WEIGHT,
   DJ_VALUES,
+  type RoundBoard,
 } from './sim-engine';
 import {
   buildValueTable,
@@ -1403,10 +1407,13 @@ describe('sim-engine', () => {
       }
     });
 
-    it('resolveBoardControl: the configured model, defaulting to the leader shim', () => {
+    it('resolveBoardControl: any non-default square selection implies tracked; otherwise the configured shim', () => {
       expect(resolveBoardControl(DEFAULT_CONFIG)).toBe('leader');
       expect(resolveBoardControl({ ...DEFAULT_CONFIG, boardControl: 'score-weighted' })).toBe('score-weighted');
       expect(resolveBoardControl({ ...DEFAULT_CONFIG, boardControl: 'tracked' })).toBe('tracked');
+      expect(resolveBoardControl({ ...DEFAULT_CONFIG, squareSelection: 'ddSeek' })).toBe('tracked');
+      expect(resolveBoardControl({ ...DEFAULT_CONFIG, opponentSquareSelection: 'ddSeek' })).toBe('tracked');
+      expect(resolveBoardControl({ ...DEFAULT_CONFIG, squareSelection: 'default' })).toBe('leader');
     });
 
     it('tracked-mode DJ placement never puts both DDs in one column; row marginals still follow the prior', () => {
@@ -1428,5 +1435,164 @@ describe('sim-engine', () => {
         expect(frac).toBeLessThan(EMPIRICAL_DD_ROW_WEIGHTS.DJ[row] + 0.03);
       }
     });
+  });
+
+  describe("square selection: 'ddSeek' (Tesauro 2012 p_DD + 0.1·p_RC)", () => {
+    const dmOf = (value: number, round: 'J' | 'DJ') =>
+      round === 'J' ? Math.max(0.3, 1 - (value / 1000) * 0.3) : Math.max(0.25, 1 - (value / 2000) * 0.4);
+
+    /** Independent re-implementation of the objective for a board state. */
+    function expectedScores(board: RoundBoard, precision: number, round: 'J' | 'DJ', w: number[]): number[] {
+      const scores: number[] = [];
+      let z = 0;
+      for (let i = 0; i < board.n; i++) {
+        if (board.played[i]) continue;
+        const blocked = board.cols[i] >= 0 && (board.ddFoundColMask & (1 << board.cols[i])) !== 0;
+        if (!blocked) z += w[board.rows[i]];
+      }
+      for (let i = 0; i < board.n; i++) {
+        if (board.played[i]) { scores.push(-Infinity); continue; }
+        const blocked = board.cols[i] >= 0 && (board.ddFoundColMask & (1 << board.cols[i])) !== 0;
+        const pDD = blocked || z === 0 ? 0 : board.ddRemaining * w[board.rows[i]] / z;
+        const pRC = precision * dmOf(board.values[i], round);
+        scores.push(pDD + DD_SEEK_RETAIN_CONTROL_WEIGHT * pRC);
+      }
+      return scores;
+    }
+
+    it('fixed DJ board state: the chosen square has the maximal score among remaining squares (lowest index on ties)', () => {
+      const you = makePlayer(0.8, 0.9, 0.7);
+      const config: SimConfig = { ...DEFAULT_CONFIG, ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS };
+      const board = createRoundBoard(buildFullBoard(DJ_VALUES), 'DJ');
+      // Play out: all of column 0, the top two rows everywhere, and rows 3–4
+      // of columns 1 and 2; the first DD was found in column 2.
+      for (let i = 0; i < 30; i++) {
+        const col = Math.floor(i / 5), row = i % 5;
+        if (col === 0 || row <= 1 || ((col === 1 || col === 2) && row >= 3)) { board.played[i] = 1; board.playedCount++; }
+      }
+      board.ddRemaining = 1;
+      board.ddFoundColMask = 1 << 2;
+
+      const chosen = chooseSquare(board, 'ddSeek', you, 'DJ', config);
+      const scores = expectedScores(board, you.p, 'DJ', EMPIRICAL_DD_ROW_WEIGHTS.DJ);
+      const best = Math.max(...scores);
+      expect(board.played[chosen]).toBe(0);
+      expect(scores[chosen]).toBeCloseTo(best, 12);
+      expect(chosen).toBe(scores.indexOf(best)); // first (leftmost) of the tied maxima
+      // And concretely: row 3 (the DJ mode) in the leftmost column still
+      // holding row 3 that isn't the found-DD column → column 3, index 18.
+      expect(chosen).toBe(18);
+    });
+
+    it('a column whose DD was already found scores only its retain-control term', () => {
+      const you = makePlayer(0.8, 0.9, 0.7);
+      const config: SimConfig = { ...DEFAULT_CONFIG, ddRowWeights: { J: [0, 0, 0, 0, 1], DJ: [0, 0, 0, 0, 1] } };
+      const board = createRoundBoard(buildFullBoard(DJ_VALUES), 'DJ');
+      // Only two squares left: bottom-row column 1 (DD column already found)
+      // and a row-2 square in column 4. Prior says bottom row only, but
+      // column 1 is ruled out, so p_DD there is 0 and the row-2 square
+      // (p_DD = 1 × w / Σ … = 0 too, since its row weight is 0) wins on the
+      // higher retain-control term of the easier clue.
+      for (let i = 0; i < 30; i++) { board.played[i] = 1; board.playedCount++; }
+      const bottomCol1 = 1 * 5 + 4, row2Col4 = 4 * 5 + 2;
+      board.played[bottomCol1] = 0; board.played[row2Col4] = 0; board.playedCount -= 2;
+      board.ddRemaining = 1;
+      board.ddFoundColMask = 1 << 1;
+      expect(chooseSquare(board, 'ddSeek', you, 'DJ', config)).toBe(row2Col4);
+      // Lift the column block and the bottom-row square wins outright.
+      board.ddFoundColMask = 0;
+      expect(chooseSquare(board, 'ddSeek', you, 'DJ', config)).toBe(bottomCol1);
+    });
+
+    it('with every DD in the round found, ddSeek falls back to the default (lowest-index) order', () => {
+      const you = makePlayer(0.8, 0.9, 0.7);
+      const board = createRoundBoard(buildFullBoard(J_VALUES), 'J');
+      board.played[0] = 1; board.played[1] = 1; board.playedCount = 2;
+      board.ddRemaining = 0;
+      expect(chooseSquare(board, 'ddSeek', you, 'J', DEFAULT_CONFIG)).toBe(2);
+      expect(chooseSquare(board, 'default', you, 'J', DEFAULT_CONFIG)).toBe(2);
+    });
+
+    it('never selects a played square and never runs a round past 30 clues (everyone seeking, 500 seeded games)', () => {
+      const you = makePlayer(0.8, 0.9, 0.7, 0.6);
+      const config: SimConfig = {
+        ...DEFAULT_CONFIG, squareSelection: 'ddSeek', opponentSquareSelection: 'ddSeek', ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS,
+      };
+      const rng = mulberry32(4242);
+      for (let g = 0; g < 500; g++) {
+        const r = simulateGame(you, sampleOpponent(OPPONENT_PROFILES.average, rng), sampleOpponent(OPPONENT_PROFILES.champion, rng), config, true, rng);
+        expect(r.history!.length).toBe(61);
+        expect(r.playOrder!.length).toBe(60);
+        expect(r.ddEvents!.length).toBe(3);
+        for (const round of [0, 30]) {
+          const order = r.playOrder!.slice(round, round + 30);
+          expect(new Set(order).size).toBe(30);
+          for (const idx of order) { expect(idx).toBeGreaterThanOrEqual(0); expect(idx).toBeLessThan(30); }
+        }
+      }
+    });
+
+    it('a seeking controller uncovers DDs before a top-down one would (row 3, the DJ mode, comes first under the empirical prior)', () => {
+      const you = makePlayer(0.8, 0.9, 0.7, 0.6);
+      const config: SimConfig = { ...DEFAULT_CONFIG, squareSelection: 'ddSeek', ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS };
+      const r = simulateRound([you, you, you], [0, 0, 0], buildFullBoard(DJ_VALUES), 2, 'DJ', config, true, mulberry32(8), 0);
+      // First pick by the seeker: row 3 ($1600) of column 0.
+      expect(r.playOrder[0]).toBe(3);
+    });
+
+    it("'ddSeek' vs 'default' for a strong player vs Average opponents: paired seeds, measured lift (see comment)", () => {
+      // Per-game seeds (mulberry32(base + i·7919)) so both strategies see
+      // the same opponents and the same J-round DD placement in game i —
+      // common random numbers, then the streams diverge at the first
+      // differing square choice.
+      //
+      // Measured at 20,000 paired games (SE of the paired difference ≈ 0.5pp):
+      //   Tesauro-like config (difficultyScaling: false — DD accuracy =
+      //   precision, as the paper models DD accuracy as its own flat
+      //   parameter):   default 66.66% → ddSeek 76.66%   lift +10.0pp
+      //   Production config (difficulty scaling on, 'aggressive' 75%
+      //   wagers, empirical priors): 51.44% → 52.66%     lift +1.2pp
+      //   Production vs Champion opponents:     31.19% → 34.76%  lift +3.6pp
+      //   Production, 'conservative' wagers:    53.27% → 56.54%  lift +3.3pp
+      //   Your DDs/game in every case: ≈1.29 → ≈2.0 (of 3).
+      // The production lift is small because the engine's difficulty-by-row
+      // multiplier applies to DDs too: a bottom-row DD is answered at ~64%,
+      // so at 75%-of-score wagers it is close to EV-neutral with high
+      // variance — finding more of them barely helps a favorite. Under the
+      // paper's flat DD accuracy the effect is the "overwhelmingly the top
+      // factor" the paper reports. The clear-margin assertion is on that
+      // config; production is asserted non-negative with its number logged.
+      const you = makePlayer(0.8, 0.9, 0.7, 0.6);
+      const run = (base: SimConfig, n: number) => {
+        const cfgDefault: SimConfig = { ...base, boardControl: 'tracked', squareSelection: 'default' };
+        const cfgSeek: SimConfig = { ...base, boardControl: 'tracked', squareSelection: 'ddSeek' };
+        let wD = 0, wS = 0, ddD = 0, ddS = 0;
+        for (let i = 0; i < n; i++) {
+          for (const seek of [false, true]) {
+            const rng = mulberry32(1000 + i * 7919);
+            const o1 = sampleOpponent(OPPONENT_PROFILES.average, rng);
+            const o2 = sampleOpponent(OPPONENT_PROFILES.average, rng);
+            const r = simulateGame(you, o1, o2, seek ? cfgSeek : cfgDefault, true, rng);
+            const mine = r.ddEvents!.filter(e => e.player === 0).length;
+            if (seek) { if (r.winner === 0) wS++; ddS += mine; } else { if (r.winner === 0) wD++; ddD += mine; }
+          }
+        }
+        return { def: wD / n, seek: wS / n, ddDef: ddD / n, ddSeek: ddS / n };
+      };
+      const n = 8000;
+      const flat = run({ ...DEFAULT_CONFIG, ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS, difficultyScaling: false }, n);
+      const prod = run({ ...DEFAULT_CONFIG, ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS }, n);
+      const fmt = (x: { def: number; seek: number; ddDef: number; ddSeek: number }) =>
+        `default ${(x.def * 100).toFixed(2)}% → ddSeek ${(x.seek * 100).toFixed(2)}% (lift ${((x.seek - x.def) * 100).toFixed(2)}pp); your DDs/game ${x.ddDef.toFixed(2)} → ${x.ddSeek.toFixed(2)}`;
+      console.log(`[ddSeek lift, ${n} paired games]\n  flat DD accuracy: ${fmt(flat)}\n  production:       ${fmt(prod)}`);
+
+      // Mechanism: seeking finds materially more DDs either way.
+      expect(flat.ddSeek - flat.ddDef).toBeGreaterThan(0.4);
+      expect(prod.ddSeek - prod.ddDef).toBeGreaterThan(0.4);
+      // Clear margin under the paper's DD-accuracy model (≥ +5pp; measured +10pp).
+      expect(flat.seek - flat.def).toBeGreaterThan(0.05);
+      // Production: non-negative (measured +1.2pp at 20k, +1.5pp here).
+      expect(prod.seek - prod.def).toBeGreaterThan(0);
+    }, 120000);
   });
 });

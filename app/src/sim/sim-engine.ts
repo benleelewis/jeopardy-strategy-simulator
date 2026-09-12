@@ -11,7 +11,8 @@
  *   - Daily Doubles (1 in J, 2 in DJ, bottom-row bias)
  *   - Final Jeopardy (score-position wagering, correlated accuracy)
  *   - Board control (opt-in `'tracked'`: real rules for who picks the next
- *     square and who therefore hits a Daily Double)
+ *     square) and per-player square selection (`'ddSeek'`: Tesauro 2012's
+ *     p_DD + 0.1·p_RC Daily Double seeking)
  *
  * Randomness: every stochastic function takes an optional `rng: () => number`
  * (a drop-in replacement for Math.random, e.g. `mulberry32(seed)` below).
@@ -66,8 +67,8 @@ export type NonEquityDDStrategy = Exclude<DDStrategy, 'equity'>;
  *   correctly controls the board; if nobody buzzed or everyone was wrong,
  *   the previous controller keeps it; the player who takes a DD keeps
  *   control whether right or wrong. The controller both chooses the next
- *   square (lowest unplayed index — the fixed top-down order) and is the
- *   one who hits a DD when they uncover it. Round starts: the J round's first selector
+ *   square (via their `SquareSelection` strategy) and is the one who hits
+ *   a DD when they uncover it. Round starts: the J round's first selector
  *   is drawn uniformly (the returning champion's podium is not modeled);
  *   the DJ round's first selector is the lowest-scoring player after J
  *   (real rule; ties → lowest player index).
@@ -75,6 +76,24 @@ export type NonEquityDDStrategy = Exclude<DDStrategy, 'equity'>;
  *   (PLAN.md E-0) with the original fixed top-down clue order.
  */
 export type BoardControl = 'leader' | 'score-weighted' | 'tracked';
+
+/**
+ * How a player chooses the next square when they control the board
+ * (only meaningful under `'tracked'` board control — setting either
+ * square-selection field to anything but `'default'` implies it, see
+ * `resolveBoardControl`).
+ * - 'default': today's clue order — lowest unplayed board index, i.e.
+ *   top-to-bottom within a category, categories left-to-right. Under
+ *   legacy board control this is the only order and is regression-locked.
+ * - 'ddSeek': Tesauro 2012's Watson policy — pick the square maximising
+ *   `p_DD(square) + 0.1 × p_RC(square)`; once every DD in the round has
+ *   been found, fall back to 'default'. See `chooseSquare`.
+ */
+export type SquareSelection = 'default' | 'ddSeek';
+
+/** Tesauro 2012's weight on the retain-control term in the square-selection
+ *  objective ("α = 0.1 yielded the best win rate"). */
+export const DD_SEEK_RETAIN_CONTROL_WEIGHT = 0.1;
 
 export interface SimConfig {
   /** Your (player 0) DD wagering strategy. */
@@ -141,14 +160,38 @@ export interface SimConfig {
    * `DD_ROW_WEIGHTS` exactly, so the seeded regression lock is untouched.
    */
   ddRowWeights?: { J: number[]; DJ: number[] };
+  /**
+   * Your (player 0) square-selection strategy when you control the board.
+   * Defaults to `'default'` (today's fixed top-down order). Any non-default
+   * value implies `boardControl: 'tracked'` — see `resolveBoardControl`.
+   * Left out of `DEFAULT_CONFIG` on purpose (like `opponentDdStrategy`) so
+   * a `{ ...DEFAULT_CONFIG, ...cellConfig }` merge in the worker can never
+   * clobber an app-level choice with an explicit default.
+   */
+  squareSelection?: SquareSelection;
+  /**
+   * Opponents' (players 1 and 2) square-selection strategy. Defaults to
+   * `'default'` — NOT to `squareSelection` (unlike `opponentDdStrategy`,
+   * which mirrors yours): Tesauro 2012's Average Contestant model picks
+   * top-down, and mirroring would make a "you seek DDs" axis silently mean
+   * "everyone seeks DDs". Set explicitly to model Champion-style seeking
+   * opponents (Tesauro: "strong players generally exhibit more DD seeking").
+   */
+  opponentSquareSelection?: SquareSelection;
 }
 
 /**
- * The board-control model actually in effect for a config: the configured
- * value, defaulting to the `'leader'` shim. Exported so callers/tests can
- * see which model a config resolves to.
+ * The board-control model actually in effect for a config. A non-default
+ * square-selection strategy for anyone only makes sense when the
+ * controller is a real, tracked player (the whole point is WHO picks the
+ * next square), so it implies `'tracked'`; otherwise the configured shim
+ * (default `'leader'`) applies. Exported so callers/tests can see which
+ * model a config resolves to.
  */
 export function resolveBoardControl(config: SimConfig): BoardControl {
+  if (config.boardControl === 'tracked') return 'tracked';
+  if ((config.squareSelection ?? 'default') !== 'default') return 'tracked';
+  if ((config.opponentSquareSelection ?? 'default') !== 'default') return 'tracked';
   return config.boardControl ?? 'leader';
 }
 
@@ -559,7 +602,7 @@ export interface RoundBoard {
   /** 1 once the square has been played. */
   played: Uint8Array;
   /** 1 if the square holds a Daily Double (placement is hidden from the
-   *  players; square selection never reads it). */
+   *  players; `chooseSquare` never reads it). */
   isDD: Uint8Array;
   playedCount: number;
   /** Lowest index that might still be unplayed — the 'default' order's cursor. */
@@ -613,10 +656,10 @@ export function createRoundBoard(values: number[], round: 'J' | 'DJ', cols?: Arr
  * first DD (row ∝ weight, column uniform) plus the real-rules column
  * constraint for the second. On a partial board it is the Bayesian
  * posterior of a DD placed on the full board and not yet uncovered
- * (∝ weight per remaining SQUARE) — the model a Bayesian DD seeker would
- * compute, so a seeking strategy built on top of this is calibrated rather
- * than fooled by its own simulator. (Legacy mode's per-row renormalization
- * is left untouched for the regression lock.)
+ * (∝ weight per remaining SQUARE), which is what a seeker computes —
+ * placement and seeking share one generative model, so `'ddSeek'` is
+ * calibrated rather than fooled by its own simulator. (Legacy mode's
+ * per-row renormalization is left untouched for the regression lock.)
  */
 function placeDailyDoubles(board: RoundBoard, count: number, rowWeights: number[], rng: () => number): void {
   const { n, rows, cols, isDD } = board;
@@ -660,6 +703,113 @@ function chooseSquareDefault(board: RoundBoard): number {
   return i;
 }
 
+/**
+ * Tesauro 2012 DD seeking: the square maximising
+ *   p_DD(i) + 0.1 × p_RC(i)
+ * where p_DD is the posterior probability that square i hides a DD and
+ * p_RC is the controller's probability of answering i correctly if it is
+ * not one (retaining control).
+ *
+ * p_DD: Bayesian update of the row prior. A DD was placed ∝ w[row] per
+ * square; every square revealed without one is ruled out, and in DJ every
+ * square in a column whose DD was already found is ruled out. So for the
+ * squares still eligible, p_DD(i) = ddRemaining × w[row_i] / Σ_eligible w,
+ * and 0 for the rest. Exact with one DD left; with both DJ DDs still
+ * hidden it is exact on a fresh board (each square's marginal is the same
+ * for either DD and they are mutually exclusive) and a close approximation
+ * once squares have been revealed (it ignores the column coupling between
+ * the two unknown DDs) — a documented judgment call.
+ *
+ * p_RC: precision × the existing difficulty-by-row multiplier, per the
+ * task spec. The paper folds attempt rate and buzzability in as well;
+ * those are constants across squares for one player and would only shrink
+ * the tie-break term uniformly.
+ *
+ * Ties (all squares in a row score identically) break to the lowest index
+ * — leftmost category — like the default order. Once `ddRemaining` is 0
+ * the policy falls back to the default order (the paper's "after all DDs
+ * are found" switch, minus category learning, which this engine does not
+ * model).
+ *
+ * Cost: two passes over the board's ≤30 squares, no allocation.
+ */
+function chooseSquareDDSeek(
+  board: RoundBoard,
+  precision: number,
+  round: 'J' | 'DJ',
+  config: SimConfig,
+  rowWeights: number[],
+): number {
+  if (board.ddRemaining === 0) return chooseSquareDefault(board);
+  const { n, rows, cols, played } = board;
+  const roundValues = round === 'J' ? J_VALUES : DJ_VALUES;
+  const mask = board.ddFoundColMask;
+
+  // Pass 1: normaliser over eligible unplayed squares.
+  let z = 0;
+  for (let i = 0; i < n; i++) {
+    if (played[i] === 1) continue;
+    if (cols[i] >= 0 && (mask & (1 << cols[i])) !== 0) continue;
+    const r = rows[i];
+    if (r >= 0) z += rowWeights[r];
+  }
+  const ddScale = z > 0 ? board.ddRemaining / z : 0;
+
+  // Per-row retain-control term (5 rows, computed once per decision).
+  let rc0 = 0, rc1 = 0, rc2 = 0, rc3 = 0, rc4 = 0;
+  {
+    const a = DD_SEEK_RETAIN_CONTROL_WEIGHT * precision;
+    rc0 = a * effectiveDifficultyMultiplier(roundValues[0], round, config);
+    rc1 = a * effectiveDifficultyMultiplier(roundValues[1], round, config);
+    rc2 = a * effectiveDifficultyMultiplier(roundValues[2], round, config);
+    rc3 = a * effectiveDifficultyMultiplier(roundValues[3], round, config);
+    rc4 = a * effectiveDifficultyMultiplier(roundValues[4], round, config);
+  }
+
+  // Pass 2: argmax, first index wins ties.
+  let best = -1;
+  let bestScore = -Infinity;
+  for (let i = 0; i < n; i++) {
+    if (played[i] === 1) continue;
+    const r = rows[i];
+    let s: number;
+    if (r < 0) {
+      s = DD_SEEK_RETAIN_CONTROL_WEIGHT * precision
+        * effectiveDifficultyMultiplier(board.values[i], round, config);
+    } else {
+      s = r === 0 ? rc0 : r === 1 ? rc1 : r === 2 ? rc2 : r === 3 ? rc3 : rc4;
+      const eligible = cols[i] < 0 || (mask & (1 << cols[i])) === 0;
+      if (eligible) s += ddScale * rowWeights[r];
+    }
+    if (s > bestScore) {
+      bestScore = s;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/**
+ * The controller's next square under their `SquareSelection` strategy.
+ * Exported (with `createRoundBoard`) so a fixed board state can be scored
+ * in tests; the engine calls it once per clue under tracked board control.
+ * Returns the board index; never a played square; `-1` only if the board
+ * is exhausted (the engine never asks then).
+ */
+export function chooseSquare(
+  board: RoundBoard,
+  strategy: SquareSelection,
+  player: Player,
+  round: 'J' | 'DJ',
+  config: SimConfig,
+): number {
+  if (board.playedCount >= board.n) return -1;
+  if (strategy === 'ddSeek') {
+    return chooseSquareDDSeek(board, player.p, round, config, config.ddRowWeights?.[round] ?? DD_ROW_WEIGHTS);
+  }
+  return chooseSquareDefault(board);
+}
+
 /** Real rule: the lowest-scoring player after the Jeopardy round selects
  *  first in Double Jeopardy (ties → lowest player index). */
 export function lowestScoreIndex(scores: [number, number, number]): number {
@@ -679,8 +829,8 @@ export function lowestScoreIndex(scores: [number, number, number]): number {
  * Board control (see `BoardControl`): under the legacy shims the clues are
  * played in list order and `pickController` decides who hits a DD — the
  * regression-locked path, byte-identical to the original engine. Under
- * `'tracked'` the controller is a real tracked player who picks each
- * square (top-down order for now); `initialController` is
+ * `'tracked'` (implied by any non-default `SquareSelection`) the controller
+ * is a real tracked player who picks each square; `initialController` is
  * who starts the round (`-1` ⇒ one uniform draw — the J-round rule when
  * no returning champion is modeled; callers pass `lowestScoreIndex` for DJ).
  *
@@ -742,7 +892,10 @@ export function simulateRound(
     let i: number;
     let isDD: boolean;
     if (board !== null) {
-      i = chooseSquareDefault(board);
+      const strategy: SquareSelection = controller === 0
+        ? (config.squareSelection ?? 'default')
+        : (config.opponentSquareSelection ?? 'default');
+      i = chooseSquare(board, strategy, players[controller], round, config);
       board.played[i] = 1;
       board.playedCount++;
       isDD = board.isDD[i] === 1;
