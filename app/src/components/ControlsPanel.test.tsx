@@ -24,6 +24,10 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof ControlsPanel>
     equityBuildStatus: 'idle' as const,
     equityBuildProgress: 0,
     onCancelEquityBuild: vi.fn(),
+    refinedSpeed: 'normal' as const,
+    onRefinedSpeedChange: vi.fn(),
+    showDDImpact: false,
+    onShowDDImpactChange: vi.fn(),
     ...overrides,
   };
 }
@@ -132,5 +136,61 @@ describe('ControlsPanel — knob pinning while Optimal is active (E-7)', () => {
     render(<ControlsPanel {...baseProps({ ddStrategy: 'aggressive' })} />);
     expect(screen.getByRole('slider', { name: 'Opponent Strength' })).not.toBeDisabled();
     expect(screen.getByRole('checkbox', { name: /Include Final Jeopardy/ })).not.toBeDisabled();
+  });
+});
+
+describe('ControlsPanel — Speed vs Accuracy (P-1C)', () => {
+  it('renders three stops with Normal selected by default and the games/cell count shown', () => {
+    render(<ControlsPanel {...baseProps({ refinedSpeed: 'normal' })} />);
+    const group = screen.getByRole('group', { name: 'Speed vs Accuracy' });
+    expect(group).toBeInTheDocument();
+
+    expect(screen.getByRole('button', { name: 'Fast' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByRole('button', { name: 'Normal' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Precise' })).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByText('450 games/cell on the refined pass')).toBeInTheDocument();
+  });
+
+  it('calls onRefinedSpeedChange with the clicked stop', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<ControlsPanel {...baseProps({ refinedSpeed: 'normal', onRefinedSpeedChange: onChange })} />);
+
+    await user.click(screen.getByRole('button', { name: 'Precise' }));
+    expect(onChange).toHaveBeenCalledWith('precise');
+
+    await user.click(screen.getByRole('button', { name: 'Fast' }));
+    expect(onChange).toHaveBeenCalledWith('fast');
+  });
+
+  it('reflects Fast and Precise selection with the correct games/cell count', () => {
+    const { rerender } = render(<ControlsPanel {...baseProps({ refinedSpeed: 'fast' })} />);
+    expect(screen.getByRole('button', { name: 'Fast' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('150 games/cell on the refined pass')).toBeInTheDocument();
+
+    rerender(<ControlsPanel {...baseProps({ refinedSpeed: 'precise' })} />);
+    expect(screen.getByRole('button', { name: 'Precise' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('1,200 games/cell on the refined pass')).toBeInTheDocument();
+  });
+});
+
+describe('ControlsPanel — Show DD impact (P2 TODOS.md)', () => {
+  it('is unchecked by default', () => {
+    render(<ControlsPanel {...baseProps({ showDDImpact: false })} />);
+    expect(screen.getByRole('checkbox', { name: 'Show DD impact' })).not.toBeChecked();
+  });
+
+  it('reflects a checked state', () => {
+    render(<ControlsPanel {...baseProps({ showDDImpact: true })} />);
+    expect(screen.getByRole('checkbox', { name: 'Show DD impact' })).toBeChecked();
+  });
+
+  it('calls onShowDDImpactChange when toggled', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<ControlsPanel {...baseProps({ showDDImpact: false, onShowDDImpactChange: onChange })} />);
+
+    await user.click(screen.getByRole('checkbox', { name: 'Show DD impact' }));
+    expect(onChange).toHaveBeenCalledWith(true);
   });
 });

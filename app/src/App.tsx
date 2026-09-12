@@ -19,8 +19,10 @@ import {
   fractionToValue,
   buzzSpeedToWinPct,
   interpolateOpponent,
+  REFINED_GAMES_PER_CELL,
   type DimensionName,
   type AxisPreset,
+  type RefinedSpeed,
 } from './sim/dimensions';
 import './App.css';
 
@@ -73,6 +75,7 @@ interface AppState {
   fj: boolean;
   theme: 'clean' | 'jeopardy';
   tab: 'your-game' | 'explorer' | 'games';
+  refinedSpeed: RefinedSpeed;
 }
 
 function encodeState(s: AppState): string {
@@ -84,6 +87,7 @@ function encodeState(s: AppState): string {
     `fj=${s.fj ? 1 : 0}`,
     `t=${s.theme === 'jeopardy' ? 'j' : 'c'}`,
     `tab=${s.tab}`,
+    `sp=${s.refinedSpeed[0]}`, // 'f' | 'n' | 'p' — Speed vs Accuracy (P-1C)
   ];
   // Only encode non-default pinned values
   for (const [name, val] of Object.entries(s.pinned)) {
@@ -125,6 +129,11 @@ function decodeState(hash: string): Partial<AppState> | null {
   const tab = params.get('tab') as AppState['tab'];
   if (tab && ['your-game', 'explorer', 'games'].includes(tab)) result.tab = tab;
 
+  const sp = params.get('sp');
+  if (sp === 'f') result.refinedSpeed = 'fast';
+  else if (sp === 'n') result.refinedSpeed = 'normal';
+  else if (sp === 'p') result.refinedSpeed = 'precise';
+
   // Pinned values
   const pinned: Record<string, number> = {};
   for (const [key, val] of params.entries()) {
@@ -163,6 +172,14 @@ export default function App() {
   });
   const [includeFJ, setIncludeFJ] = useState(initial?.fj ?? true);
   const [theme, setTheme] = useState<'clean' | 'jeopardy'>(initial?.theme ?? 'clean');
+  // P-1C "Speed vs Accuracy": games/cell for the Explorer grid's refined
+  // pass. Default 'normal' (450) reproduces the pre-existing hardcoded
+  // behavior/timing exactly.
+  const [refinedSpeed, setRefinedSpeed] = useState<RefinedSpeed>(initial?.refinedSpeed ?? 'normal');
+  // P2 "DD impact difference map overlay" (TODOS.md). Off by default, not
+  // persisted in the URL hash (a per-session viewing toggle, not a
+  // strategy/knob choice).
+  const [showDDImpact, setShowDDImpact] = useState(false);
   // Landing tab is All Games: it is the one view that reads on its own, with
   // no numbers to type in first. Your Game and Explorer are opt-in from there.
   const [tab, setTab] = useState<AppState['tab']>(initial?.tab ?? 'games');
@@ -271,11 +288,12 @@ export default function App() {
       fj: includeFJ,
       theme,
       tab,
+      refinedSpeed,
     };
     const hash = encodeState(state);
     // Use replaceState to avoid polluting browser history on every drag
     window.history.replaceState(null, '', `#${hash}`);
-  }, [position, xAxis, yAxis, pinnedValues, includeFJ, theme, tab]);
+  }, [position, xAxis, yAxis, pinnedValues, includeFJ, theme, tab, refinedSpeed]);
 
   // --- Load games.json on mount ---
   useEffect(() => {
@@ -720,6 +738,8 @@ export default function App() {
                   pulseToken={pulseToken}
                   equityBuildStatus={ddStrategy === 'equity' ? equityBuildStatus : 'idle'}
                   equityBuildProgress={equityBuildProgress}
+                  refinedGamesPerCell={REFINED_GAMES_PER_CELL[refinedSpeed]}
+                  showDDImpact={showDDImpact}
                 />
               </div>
             </div>
@@ -766,6 +786,10 @@ export default function App() {
                   equityBuildStatus={equityBuildStatus}
                   equityBuildProgress={equityBuildProgress}
                   onCancelEquityBuild={handleCancelEquityBuild}
+                  refinedSpeed={refinedSpeed}
+                  onRefinedSpeedChange={setRefinedSpeed}
+                  showDDImpact={showDDImpact}
+                  onShowDDImpactChange={setShowDDImpact}
                 />
               </details>
             </div>

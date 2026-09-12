@@ -32,6 +32,22 @@ export interface DimensionConfig {
   };
 }
 
+// ─── Speed vs Accuracy (P-1C) ──────────────────────────────────────
+//
+// Explorer grid sweep's REFINED (second) pass games/cell, configurable via
+// ControlsPanel. The fast pass (150 games/cell, resolution 20) is always
+// fixed and unaffected by this control.
+
+export type RefinedSpeed = 'fast' | 'normal' | 'precise';
+
+/** 'normal' (450) matches the pre-existing hardcoded refined-pass count —
+ *  the default keeps today's behavior/timing exactly. */
+export const REFINED_GAMES_PER_CELL: Record<RefinedSpeed, number> = {
+  fast: 150,
+  normal: 450,
+  precise: 1200,
+};
+
 export type DimensionName =
   | 'knowledge'
   | 'buzzerSpeed'

@@ -1,8 +1,17 @@
 import { useState } from 'react';
-import { DIMENSIONS, getPinnedDimNames, valueToFraction, fractionToValue, type DimensionName } from '../sim/dimensions';
+import {
+  DIMENSIONS, getPinnedDimNames, valueToFraction, fractionToValue,
+  REFINED_GAMES_PER_CELL, type DimensionName, type RefinedSpeed,
+} from '../sim/dimensions';
 import type { DDStrategy } from '../sim/sim-engine';
 
 export type EquityBuildStatus = 'idle' | 'building' | 'ready' | 'failed';
+
+const SPEED_OPTIONS: { value: RefinedSpeed; label: string }[] = [
+  { value: 'fast', label: 'Fast' },
+  { value: 'normal', label: 'Normal' },
+  { value: 'precise', label: 'Precise' },
+];
 
 interface Props {
   xAxis: DimensionName;
@@ -18,6 +27,11 @@ interface Props {
   equityBuildStatus: EquityBuildStatus;
   equityBuildProgress: number;
   onCancelEquityBuild: () => void;
+  refinedSpeed: RefinedSpeed;
+  onRefinedSpeedChange: (s: RefinedSpeed) => void;
+  /** P2 "DD impact difference map overlay" (TODOS.md). Off by default. */
+  showDDImpact: boolean;
+  onShowDDImpactChange: (v: boolean) => void;
 }
 
 const sectionStyle: React.CSSProperties = {
@@ -56,6 +70,8 @@ export function ControlsPanel({
   theme, onThemeChange,
   ddStrategy, onDdStrategyChange,
   equityBuildStatus, equityBuildProgress, onCancelEquityBuild,
+  refinedSpeed, onRefinedSpeedChange,
+  showDDImpact, onShowDDImpactChange,
 }: Props) {
   // Pinned dimensions for the current axis pair (P-1: several dims write
   // the same Player fields, so only the dims that actually apply for these
@@ -102,6 +118,14 @@ export function ControlsPanel({
           buildProgress={equityBuildProgress}
           onCancel={onCancelEquityBuild}
         />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, cursor: 'pointer', fontSize: '13px', color: 'var(--text)' }}>
+          <input
+            type="checkbox"
+            checked={showDDImpact}
+            onChange={(e) => onShowDDImpactChange(e.target.checked)}
+          />
+          Show DD impact
+        </label>
       </div>
 
       <div style={{ ...sectionStyle, fontWeight: 600, fontSize: '14px', color: 'var(--text-h)' }}>
@@ -194,6 +218,38 @@ export function ControlsPanel({
             </>
           );
         })()}
+      </div>
+
+      <div style={sectionStyle}>
+        <label style={labelStyle}>Speed vs Accuracy</label>
+        <div style={{ display: 'flex', gap: 8 }} role="group" aria-label="Speed vs Accuracy">
+          {SPEED_OPTIONS.map(opt => {
+            const isSelected = opt.value === refinedSpeed;
+            return (
+              <button
+                key={opt.value}
+                onClick={() => onRefinedSpeedChange(opt.value)}
+                aria-pressed={isSelected}
+                style={{
+                  flex: 1,
+                  minHeight: 44,
+                  padding: '8px',
+                  border: `2px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
+                  borderRadius: 6,
+                  background: isSelected ? 'var(--accent)' : 'transparent',
+                  color: isSelected ? '#fff' : 'var(--text)',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: 6 }}>
+          {REFINED_GAMES_PER_CELL[refinedSpeed].toLocaleString()} games/cell on the refined pass
+        </div>
       </div>
 
       <div style={sectionStyle}>

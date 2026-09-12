@@ -31,6 +31,14 @@
  *        simSingleGameDetail's existing unseeded numSims path above.
  *   OUT: { type: 'simulateGameDetailResult', gameIndex, ddEvents, scores,
  *          winner, you: { knowledge, buzzerSpeed } }
+ *
+ *   IN:  { type: 'computeDDImpactGrid', xAxis, yAxis, pinnedValues, config,
+ *        resolution, gamesPerCell, seed? }
+ *   OUT: { type: 'ddImpactProgress', pct }
+ *   OUT: { type: 'ddImpactGridResult', grid }  (DDImpactCell[]: per-cell
+ *        winRate(current DD strategy) - winRate(DD strategy 'off'), both
+ *        run with the SAME seed/gamesPerCell so the difference isolates
+ *        the DD-strategy effect rather than independent Monte Carlo noise)
  */
 
 import {
@@ -57,6 +65,22 @@ export interface GridCell {
   knowledge: number;
   buzzerSpeed: number;
 }
+
+/** P2 "DD impact difference map overlay" (TODOS.md) — one cell of the
+ *  computeDDImpactGrid result. */
+export interface DDImpactCell {
+  /** Normalized X-axis value [0,1] */
+  x: number;
+  /** Normalized Y-axis value [0,1] */
+  y: number;
+  /** winRate(current DD strategy) - winRate(DD strategy 'off'), same seed
+   *  and gamesPerCell for both runs. */
+  diff: number;
+}
+
+/** Default seed for computeDDImpactGrid when the caller doesn't pass one —
+ *  keeps the overlay reproducible across repeat toggles at the same knobs. */
+const DEFAULT_DD_IMPACT_SEED = 0xD1F5eed;
 
 let cancelled = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -173,6 +197,44 @@ self.onmessage = (e: MessageEvent) => {
     }
 
     self.postMessage({ type: 'gridResult', grid });
+  }
+
+  if (msg.type === 'computeDDImpactGrid') {
+    const {
+      resolution,
+      gamesPerCell = 200,
+      xAxis = 'knowledge',
+      yAxis = 'buzzerSpeed',
+      pinnedValues = {},
+      seed = DEFAULT_DD_IMPACT_SEED,
+    } = msg;
+    const config = msg.config ?? DEFAULT_CONFIG;
+
+    if (!DIMENSIONS[xAxis as DimensionName]) {
+      self.postMessage({ type: 'error', message: `Unknown dimension: ${xAxis}` });
+      return;
+    }
+    if (!DIMENSIONS[yAxis as DimensionName]) {
+      self.postMessage({ type: 'error', message: `Unknown dimension: ${yAxis}` });
+      return;
+    }
+
+    const diffGrid = buildDDImpactGrid(
+      xAxis as DimensionName,
+      yAxis as DimensionName,
+      pinnedValues,
+      config,
+      resolution,
+      gamesPerCell,
+      seed,
+      {
+        onProgress: (pct) => self.postMessage({ type: 'ddImpactProgress', pct }),
+        isCancelled: () => cancelled,
+      },
+    );
+    if (diffGrid === null) return; // cancelled mid-computation — mirrors computeGrid's abort-silently semantics
+
+    self.postMessage({ type: 'ddImpactGridResult', grid: diffGrid });
   }
 
   if (msg.type === 'simAllGames') {
@@ -394,4 +456,92 @@ function resolveDDStrategy(
     merged.valueTable = selector === 'equity' ? config.valueTable : undefined;
   }
   return merged;
+}
+
+/**
+ * P2 "DD impact difference map overlay" (TODOS.md) — pure grid-diff
+ * builder, exported for direct unit testing (no `self`/postMessage
+ * dependency; the `computeDDImpactGrid` message handler above is a thin
+ * wrapper that also reports progress/cancellation).
+ *
+ * For each cell, runs the CURRENT DD strategy (resolved exactly like
+ * computeGrid's own cells) and the same cell with DD strategy forced 'off',
+ * seeded IDENTICALLY per cell — same opponent samples, clue draws, and buzz
+ * races — so `diff` isolates the DD-strategy effect rather than
+ * independent Monte Carlo noise between two unrelated runs. When the
+ * current strategy already IS 'off', `currentConfig` and `offConfig` are
+ * the same simulation run twice with the same seed, so diff is exactly 0.
+ *
+ * Returns `null` if `hooks.isCancelled()` becomes true mid-computation
+ * (caller should drop the partial result, mirroring computeGrid's
+ * abort-silently semantics).
+ */
+export function buildDDImpactGrid(
+  xAxis: DimensionName,
+  yAxis: DimensionName,
+  pinnedValues: Record<string, number>,
+  config: SimConfig,
+  resolution: number,
+  gamesPerCell: number,
+  seed: number = DEFAULT_DD_IMPACT_SEED,
+  hooks: { onProgress?: (pct: number) => void; isCancelled?: () => boolean } = {},
+): DDImpactCell[] | null {
+  const xDim = DIMENSIONS[xAxis];
+  const yDim = DIMENSIONS[yAxis];
+
+  const diffGrid: DDImpactCell[] = [];
+  const totalCells = (resolution + 1) * (resolution + 1);
+  let computed = 0;
+
+  for (let xi = 0; xi <= resolution; xi++) {
+    for (let yi = 0; yi <= resolution; yi++) {
+      if (hooks.isCancelled?.()) return null;
+
+      const xNorm = xi / resolution;
+      const yNorm = yi / resolution;
+      const xVal = xDim.range[0] + (xDim.range[1] - xDim.range[0]) * xNorm;
+      const yVal = yDim.range[0] + (yDim.range[1] - yDim.range[0]) * yNorm;
+
+      const { player, config: cellConfig, opponentProfile } = buildSimParams(
+        xAxis,
+        yAxis,
+        xVal,
+        yVal,
+        { ...pinnedValues, ...configToPinned(config) },
+      );
+
+      // Same resolution as computeGrid's current-strategy config...
+      const currentConfig = resolveDDStrategy(config, cellConfig, xAxis, yAxis);
+      // ...vs. the same config with DD strategy forced 'off' (no wager
+      // fraction/value-table left over from whatever strategy is active).
+      const offConfig: SimConfig = {
+        ...currentConfig,
+        ddStrategy: 'off',
+        ddWagerFraction: undefined,
+        valueTable: undefined,
+      };
+
+      // Same seed for both runs (derived per-cell so different cells
+      // aren't correlated with each other) — every opponent sample, clue
+      // draw, and buzz race is identical between the two runs, only the DD
+      // wager/strategy differs.
+      const cellSeed = (seed + xi * (resolution + 1) + yi) >>> 0;
+
+      const { winRate: winRateCurrent } = calculateWinRate(
+        player, opponentProfile, currentConfig, gamesPerCell, false, mulberry32(cellSeed),
+      );
+      const { winRate: winRateOff } = calculateWinRate(
+        player, opponentProfile, offConfig, gamesPerCell, false, mulberry32(cellSeed),
+      );
+
+      diffGrid.push({ x: xNorm, y: yNorm, diff: winRateCurrent - winRateOff });
+      computed++;
+
+      if (computed % Math.max(1, Math.floor(totalCells / 20)) === 0) {
+        hooks.onProgress?.(computed / totalCells);
+      }
+    }
+  }
+
+  return diffGrid;
 }
