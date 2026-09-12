@@ -16,6 +16,14 @@ import {
   type NonEquityDDStrategy,
   computeFJWagersStandard,
   fjEquityGridSearch,
+  buildFullBoard,
+  createRoundBoard,
+  chooseSquare,
+  resolveBoardControl,
+  lowestScoreIndex,
+  DD_SEEK_RETAIN_CONTROL_WEIGHT,
+  DJ_VALUES,
+  type RoundBoard,
 } from './sim-engine';
 import {
   buildValueTable,
@@ -1165,5 +1173,456 @@ describe('sim-engine', () => {
       }
       console.log(`[E-5 FJ] standard vs equity win-prob gap (uncorrelated eval draws):\n${lines.join('\n')}`);
     }, 30000);
+  });
+
+  // ─── Board control + DD seeking (TODOS "P2 — DD seeking / square-selection strategy") ──
+
+  /** Empirical DD row priors from app/public/clue-stats.json (E-1/E-6). */
+  const EMPIRICAL_DD_ROW_WEIGHTS = {
+    J: [0.0003551977267345489, 0.07009235140895098, 0.2418896519062278, 0.3607624911200568, 0.3269003078380298],
+    DJ: [0.0014561127613722407, 0.09790902207466946, 0.2785252489952822, 0.3822587221154406, 0.23985089405323548],
+  };
+
+  describe('regression lock: legacy board control is byte-identical after the tracked-control refactor', () => {
+    // Every literal below was captured by running THIS code against the
+    // engine as it stood BEFORE tracked board control / square selection
+    // were added (commit b026193). With the new flags at their defaults the
+    // refactored simulateRound must reproduce them exactly — same rng call
+    // sequence, same arithmetic — across DEFAULT_CONFIG and every legacy
+    // config knob (score-weighted control, empirical priors, DD off + no FJ,
+    // split wager strategies, partial-board simulateFromState).
+    const you = makePlayer(0.75, 0.88, 0.62, 0.55);
+
+    it('12 seeded games under DEFAULT_CONFIG reproduce their pre-change scores exactly', () => {
+      const rng = mulberry32(0xbeef);
+      const games: number[][] = [];
+      for (let i = 0; i < 12; i++) {
+        const o1 = sampleOpponent(OPPONENT_PROFILES.average, rng);
+        const o2 = sampleOpponent(OPPONENT_PROFILES.champion, rng);
+        const r = simulateGame(you, o1, o2, DEFAULT_CONFIG, true, rng);
+        games.push([...r.scores, r.winner, r.ddEvents!.length, r.history!.length]);
+      }
+      expect(games).toEqual([
+        [0, 7200, 10400, 2, 3, 61], [0, 3500, 29775, 2, 3, 61], [13125, 9900, 13124, 0, 3, 61],
+        [20134, 0, 0, 0, 3, 61], [0, 3199, 20400, 2, 3, 61], [23300, 29288, 0, 1, 3, 61],
+        [24001, 0, 23600, 0, 3, 61], [18825, 18000, 23700, 2, 3, 61], [12801, 0, 4650, 0, 3, 61],
+        [10001, 10000, 0, 0, 3, 61], [20000, 0, 5067, 0, 3, 61], [0, 0, 42698, 2, 3, 61],
+      ]);
+    });
+
+    it('300-game seeded aggregates reproduce their pre-change values under every legacy config knob', () => {
+      const configs: Record<string, SimConfig> = {
+        default: DEFAULT_CONFIG,
+        scoreWeighted: { ...DEFAULT_CONFIG, boardControl: 'score-weighted' },
+        empirical: { ...DEFAULT_CONFIG, ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS },
+        ddOffNoFJ: { ...DEFAULT_CONFIG, ddStrategy: 'off', includeFJ: false },
+        splitStrategies: {
+          ...DEFAULT_CONFIG, ddStrategy: 'truedd', opponentDdStrategy: 'conservative', fjSecondPlaceStrategy: 'twoThirdsRule',
+        },
+      };
+      const agg: Record<string, number[]> = {};
+      for (const [name, cfg] of Object.entries(configs)) {
+        const rng = mulberry32(20260911);
+        let sum = 0, wins = 0, ddSum = 0;
+        for (let i = 0; i < 300; i++) {
+          const o1 = sampleOpponent(OPPONENT_PROFILES.average, rng);
+          const o2 = sampleOpponent(OPPONENT_PROFILES.average, rng);
+          const r = simulateGame(you, o1, o2, cfg, true, rng);
+          sum += r.scores[0] * 3 + r.scores[1] * 5 + r.scores[2] * 7;
+          if (r.winner === 0) wins++;
+          for (const e of r.ddEvents!) ddSum += e.wager * (e.correct ? 1 : -1) + e.clueIndex + e.player * 1000;
+        }
+        agg[name] = [sum, wins, ddSum];
+      }
+      expect(agg).toEqual({
+        default: [53389904, 125, 1648707],
+        scoreWeighted: [55678053, 124, 1894481],
+        empirical: [60787587, 119, 2826176],
+        ddOffNoFJ: [52647000, 128, 0],
+        splitStrategies: [52434934, 100, 1579196],
+      });
+    });
+
+    it('partial-board simulateFromState reproduces its pre-change results exactly', () => {
+      const rng = mulberry32(777);
+      const state: SimState = {
+        scores: [4200, 3800, 1000], round: 'J',
+        remainingClueValues: [800, 1000, 600, 1000, 800, 200, 400], remainingDDCount: 1,
+      };
+      const out: number[][] = [];
+      for (let i = 0; i < 5; i++) {
+        const r = simulateFromState(state, [you, you, sampleOpponent(OPPONENT_PROFILES.average, rng)], DEFAULT_CONFIG, rng, true);
+        out.push([...r.scores, r.winner, r.history!.length]);
+      }
+      expect(out).toEqual([
+        [13200, 15496, 0, 1, 38], [22250, 0, 0, 0, 38], [9575, 11600, 10400, 1, 38],
+        [0, 3199, 25200, 2, 38], [0, 0, 26501, 2, 38],
+      ]);
+    });
+
+    it('legacy results expose playOrder 0..29 per round and no tracked controller (-1)', () => {
+      const rng = mulberry32(5);
+      const r = simulateGame(you, you, you, DEFAULT_CONFIG, true, rng);
+      expect(r.playOrder).toEqual([...Array(30).keys(), ...Array(30).keys()]);
+      expect(r.controllers!.every(c => c === -1)).toBe(true);
+    });
+  });
+
+  describe('tracked board control follows the rules', () => {
+    // rhoB = rhoP = 0 makes every draw a plain `rng() < p` Bernoulli, and
+    // difficultyScaling: false keeps p unscaled, so players with b, p ∈ {0, 1}
+    // script the outcome of every clue exactly.
+    const scripted: SimConfig = {
+      ...DEFAULT_CONFIG, boardControl: 'tracked', ddStrategy: 'off', rhoB: 0, rhoP: 0, difficultyScaling: false,
+    };
+    const alwaysRight = makePlayer(1, 1, 0.5);
+    const neverBuzzes = makePlayer(0, 1, 0.5);
+    const alwaysWrong = makePlayer(1, 0, 0.5);
+
+    it('a correct answer takes the board; the answerer then picks every following square', () => {
+      const r = simulateRound(
+        [neverBuzzes, alwaysRight, neverBuzzes], [0, 0, 0], buildFullBoard(J_VALUES), 0, 'J',
+        scripted, true, mulberry32(1), /* initialController */ 2,
+      );
+      expect(r.controllers[0]).toBe(2);
+      for (let k = 1; k < 30; k++) expect(r.controllers[k]).toBe(1);
+    });
+
+    it('nobody buzzes: the previous controller keeps the board all round', () => {
+      const r = simulateRound(
+        [neverBuzzes, neverBuzzes, neverBuzzes], [0, 0, 0], buildFullBoard(DJ_VALUES), 0, 'DJ',
+        scripted, true, mulberry32(2), 1,
+      );
+      expect(r.controllers).toEqual(Array(30).fill(1));
+      expect(r.scores).toEqual([0, 0, 0]);
+    });
+
+    it('everyone wrong and no successful rebound: the previous controller keeps the board', () => {
+      // All three buzz and miss; nobody is left to rebound (rebound needs a
+      // player who did NOT attempt), so control never moves.
+      const r = simulateRound(
+        [alwaysWrong, alwaysWrong, alwaysWrong], [0, 0, 0], buildFullBoard(J_VALUES), 0, 'J',
+        scripted, true, mulberry32(3), 0,
+      );
+      expect(r.controllers).toEqual(Array(30).fill(0));
+      // Sanity that clues really were missed (penalties applied).
+      expect(r.scores[0] + r.scores[1] + r.scores[2]).toBeLessThan(0);
+    });
+
+    it('a wrong buzz followed by a correct rebound hands the board to the rebounder', () => {
+      // Scripted rng: a queue of draws for clue 1, then a constant 0.5.
+      // With rhoB = rhoP = 0 the engine's draw order on a regular clue is:
+      // 3 attempt draws, 3 accuracy draws, [buzz race], [wrong-buzzer race],
+      // rebound-eligibility draws for non-attempters, 3 rebound-accuracy
+      // draws, [rebound race] — the same order the seeded regression lock
+      // already pins.
+      const fastDunce = makePlayer(1, 0, 1);      // always buzzes, always wrong
+      const halfGenius = makePlayer(0.5, 1, 1);   // attempts half the time, always right
+      const queue = [
+        0.5, 0.9, 0.5,   // attempts: dunce yes (any < 1), genius NO (0.9 ≥ 0.5), never-buzzes no
+        0.5, 0.5, 0.5,   // accuracy: dunce wrong (p = 0), others right (p = 1) — but they didn't attempt
+        0.5,             // wrong-buzzer race among attempters ([dunce])
+        0.1, 0.5,        // rebound eligibility: genius YES (0.1 < 0.5), never-buzzes no (b = 0)
+        0.5, 0.5, 0.5,   // rebound accuracy: genius right
+        0.5,             // rebound race → genius
+      ];
+      let q = 0;
+      const rng = () => (q < queue.length ? queue[q++] : 0.5);
+      const r = simulateRound(
+        [fastDunce, halfGenius, neverBuzzes], [0, 0, 0], [200, 400], 0, 'J', scripted, true, rng, 2,
+      );
+      expect(r.history[0]).toEqual([-200, 200, 0]);  // penalty, then the rebound
+      expect(r.controllers[0]).toBe(2);                // initial controller picked clue 1
+      expect(r.controllers[1]).toBe(1);                // the rebounder picks clue 2
+    });
+
+    it('seeded games: controller sequence matches the scores (whoever gained on a regular clue picks next; DD taker keeps control; DJ opens with the lowest J score)', () => {
+      const you = makePlayer(0.7, 0.85, 0.6, 0.5);
+      const opp1 = makePlayer(0.6, 0.87, 0.5, 0.5);
+      const opp2 = makePlayer(0.55, 0.8, 0.45, 0.45);
+      const config: SimConfig = { ...DEFAULT_CONFIG, boardControl: 'tracked', includeFJ: false };
+      const rng = mulberry32(2026);
+      let checkedTransitions = 0;
+      let reboundTransitions = 0;
+      for (let g = 0; g < 200; g++) {
+        const r = simulateGame(you, opp1, opp2, config, true, rng);
+        // ddEvents carry board indices; map each to its play position.
+        const ddAtPos = new Map<number, number>();
+        for (const e of r.ddEvents!) {
+          const offset = e.round === 'J' ? 0 : 30;
+          const pos = r.playOrder!.indexOf(e.clueIndex, offset);
+          expect(pos).toBeGreaterThanOrEqual(offset);
+          expect(pos).toBeLessThan(offset + 30);
+          ddAtPos.set(pos, e.player);
+        }
+        for (let k = 0; k < 60; k++) {
+          const c = r.controllers![k];
+          expect(c).toBeGreaterThanOrEqual(0);
+          expect(c).toBeLessThanOrEqual(2);
+          if (k === 0) continue;
+          if (k === 30) {
+            expect(c).toBe(lowestScoreIndex(r.history![29]));
+            continue;
+          }
+          // Outcome of clue k-1 decides who picks clue k.
+          const before: [number, number, number] = k - 1 === 0 ? [0, 0, 0] : r.history![k - 2];
+          const after = r.history![k - 1];
+          const prevController = r.controllers![k - 1];
+          const ddPlayer = ddAtPos.get(k - 1);
+          let expected: number;
+          if (ddPlayer !== undefined) {
+            expect(ddPlayer).toBe(prevController); // the controller is the one who uncovered it
+            expected = prevController;             // and keeps the board, right or wrong
+          } else {
+            const gained = [0, 1, 2].filter(p => after[p] > before[p]);
+            expect(gained.length).toBeLessThanOrEqual(1);
+            expected = gained.length === 1 ? gained[0] : prevController;
+            if (gained.length === 1 && [0, 1, 2].some(p => after[p] < before[p])) reboundTransitions++;
+          }
+          expect(c).toBe(expected);
+          checkedTransitions++;
+        }
+      }
+      expect(checkedTransitions).toBeGreaterThan(10000);
+      expect(reboundTransitions).toBeGreaterThan(50); // rebounds were exercised, not just clean buzzes
+    });
+
+    it("boardControl 'tracked' hands the DD to the tracked controller, not the leader", () => {
+      // A hopeless leader who never buzzes cannot be the tracked controller
+      // after clue 1, so under 'tracked' they must never hit a DD, whereas
+      // under 'leader' (legacy) they hit every one.
+      const leaderWhoNeverBuzzes = makePlayer(0, 1, 0.5);
+      const grinder = makePlayer(0.9, 0.95, 0.9);
+      const state: SimState = {
+        scores: [1_000_000, 0, 0], round: 'DJ', remainingClueValues: buildFullBoard(DJ_VALUES), remainingDDCount: 2, controller: 1,
+      };
+      const trackedCfg: SimConfig = { ...DEFAULT_CONFIG, boardControl: 'tracked', includeFJ: false, rhoB: 0, rhoP: 0 };
+      const leaderCfg: SimConfig = { ...DEFAULT_CONFIG, boardControl: 'leader', includeFJ: false, rhoB: 0, rhoP: 0 };
+      const rng = mulberry32(9);
+      for (let g = 0; g < 50; g++) {
+        const t = simulateFromState(state, [leaderWhoNeverBuzzes, grinder, grinder], trackedCfg, rng, true);
+        for (const e of t.ddEvents!) expect(e.player).not.toBe(0);
+        const l = simulateFromState(state, [leaderWhoNeverBuzzes, grinder, grinder], leaderCfg, rng, true);
+        for (const e of l.ddEvents!) expect(e.player).toBe(0);
+      }
+    });
+
+    it('resolveBoardControl: any non-default square selection implies tracked; otherwise the configured shim', () => {
+      expect(resolveBoardControl(DEFAULT_CONFIG)).toBe('leader');
+      expect(resolveBoardControl({ ...DEFAULT_CONFIG, boardControl: 'score-weighted' })).toBe('score-weighted');
+      expect(resolveBoardControl({ ...DEFAULT_CONFIG, boardControl: 'tracked' })).toBe('tracked');
+      expect(resolveBoardControl({ ...DEFAULT_CONFIG, squareSelection: 'ddSeek' })).toBe('tracked');
+      expect(resolveBoardControl({ ...DEFAULT_CONFIG, opponentSquareSelection: 'ddSeek' })).toBe('tracked');
+      expect(resolveBoardControl({ ...DEFAULT_CONFIG, squareSelection: 'default' })).toBe('leader');
+    });
+
+    it('tracked-mode DJ placement never puts both DDs in one column; row marginals still follow the prior', () => {
+      const you = makePlayer(0.7, 0.85, 0.6, 0.5);
+      const config: SimConfig = { ...DEFAULT_CONFIG, boardControl: 'tracked', ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS };
+      const rng = mulberry32(31337);
+      const rowCounts = [0, 0, 0, 0, 0];
+      const trials = 3000;
+      for (let i = 0; i < trials; i++) {
+        const r = simulateRound([you, you, you], [0, 0, 0], buildFullBoard(DJ_VALUES), 2, 'DJ', config, true, rng, 0);
+        expect(r.ddEvents.length).toBe(2);
+        const cols = r.ddEvents.map(e => Math.floor(e.clueIndex / 5));
+        expect(cols[0]).not.toBe(cols[1]);
+        for (const e of r.ddEvents) rowCounts[e.clueIndex % 5]++;
+      }
+      for (let row = 0; row < 5; row++) {
+        const frac = rowCounts[row] / (2 * trials);
+        expect(frac).toBeGreaterThan(EMPIRICAL_DD_ROW_WEIGHTS.DJ[row] - 0.03);
+        expect(frac).toBeLessThan(EMPIRICAL_DD_ROW_WEIGHTS.DJ[row] + 0.03);
+      }
+    });
+  });
+
+  describe("square selection: 'ddSeek' (Tesauro 2012 p_DD + 0.1·p_RC)", () => {
+    const dmOf = (value: number, round: 'J' | 'DJ') =>
+      round === 'J' ? Math.max(0.3, 1 - (value / 1000) * 0.3) : Math.max(0.25, 1 - (value / 2000) * 0.4);
+
+    /** Independent re-implementation of the objective for a board state. */
+    function expectedScores(board: RoundBoard, precision: number, round: 'J' | 'DJ', w: number[]): number[] {
+      const scores: number[] = [];
+      let z = 0;
+      for (let i = 0; i < board.n; i++) {
+        if (board.played[i]) continue;
+        const blocked = board.cols[i] >= 0 && (board.ddFoundColMask & (1 << board.cols[i])) !== 0;
+        if (!blocked) z += w[board.rows[i]];
+      }
+      for (let i = 0; i < board.n; i++) {
+        if (board.played[i]) { scores.push(-Infinity); continue; }
+        const blocked = board.cols[i] >= 0 && (board.ddFoundColMask & (1 << board.cols[i])) !== 0;
+        const pDD = blocked || z === 0 ? 0 : board.ddRemaining * w[board.rows[i]] / z;
+        const pRC = precision * dmOf(board.values[i], round);
+        scores.push(pDD + DD_SEEK_RETAIN_CONTROL_WEIGHT * pRC);
+      }
+      return scores;
+    }
+
+    it('fixed DJ board state: the chosen square has the maximal score among remaining squares (lowest index on ties)', () => {
+      const you = makePlayer(0.8, 0.9, 0.7);
+      const config: SimConfig = { ...DEFAULT_CONFIG, ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS };
+      const board = createRoundBoard(buildFullBoard(DJ_VALUES), 'DJ');
+      // Play out: all of column 0, the top two rows everywhere, and rows 3–4
+      // of columns 1 and 2; the first DD was found in column 2.
+      for (let i = 0; i < 30; i++) {
+        const col = Math.floor(i / 5), row = i % 5;
+        if (col === 0 || row <= 1 || ((col === 1 || col === 2) && row >= 3)) { board.played[i] = 1; board.playedCount++; }
+      }
+      board.ddRemaining = 1;
+      board.ddFoundColMask = 1 << 2;
+
+      const chosen = chooseSquare(board, 'ddSeek', you, 'DJ', config);
+      const scores = expectedScores(board, you.p, 'DJ', EMPIRICAL_DD_ROW_WEIGHTS.DJ);
+      const best = Math.max(...scores);
+      expect(board.played[chosen]).toBe(0);
+      expect(scores[chosen]).toBeCloseTo(best, 12);
+      expect(chosen).toBe(scores.indexOf(best)); // first (leftmost) of the tied maxima
+      // And concretely: row 3 (the DJ mode) in the leftmost column still
+      // holding row 3 that isn't the found-DD column → column 3, index 18.
+      expect(chosen).toBe(18);
+    });
+
+    it('a column whose DD was already found scores only its retain-control term', () => {
+      const you = makePlayer(0.8, 0.9, 0.7);
+      const config: SimConfig = { ...DEFAULT_CONFIG, ddRowWeights: { J: [0, 0, 0, 0, 1], DJ: [0, 0, 0, 0, 1] } };
+      const board = createRoundBoard(buildFullBoard(DJ_VALUES), 'DJ');
+      // Only two squares left: bottom-row column 1 (DD column already found)
+      // and a row-2 square in column 4. Prior says bottom row only, but
+      // column 1 is ruled out, so p_DD there is 0 and the row-2 square
+      // (p_DD = 1 × w / Σ … = 0 too, since its row weight is 0) wins on the
+      // higher retain-control term of the easier clue.
+      for (let i = 0; i < 30; i++) { board.played[i] = 1; board.playedCount++; }
+      const bottomCol1 = 1 * 5 + 4, row2Col4 = 4 * 5 + 2;
+      board.played[bottomCol1] = 0; board.played[row2Col4] = 0; board.playedCount -= 2;
+      board.ddRemaining = 1;
+      board.ddFoundColMask = 1 << 1;
+      expect(chooseSquare(board, 'ddSeek', you, 'DJ', config)).toBe(row2Col4);
+      // Lift the column block and the bottom-row square wins outright.
+      board.ddFoundColMask = 0;
+      expect(chooseSquare(board, 'ddSeek', you, 'DJ', config)).toBe(bottomCol1);
+    });
+
+    it('with every DD in the round found, ddSeek falls back to the default (lowest-index) order', () => {
+      const you = makePlayer(0.8, 0.9, 0.7);
+      const board = createRoundBoard(buildFullBoard(J_VALUES), 'J');
+      board.played[0] = 1; board.played[1] = 1; board.playedCount = 2;
+      board.ddRemaining = 0;
+      expect(chooseSquare(board, 'ddSeek', you, 'J', DEFAULT_CONFIG)).toBe(2);
+      expect(chooseSquare(board, 'default', you, 'J', DEFAULT_CONFIG)).toBe(2);
+    });
+
+    it('never selects a played square and never runs a round past 30 clues (everyone seeking, 500 seeded games)', () => {
+      const you = makePlayer(0.8, 0.9, 0.7, 0.6);
+      const config: SimConfig = {
+        ...DEFAULT_CONFIG, squareSelection: 'ddSeek', opponentSquareSelection: 'ddSeek', ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS,
+      };
+      const rng = mulberry32(4242);
+      for (let g = 0; g < 500; g++) {
+        const r = simulateGame(you, sampleOpponent(OPPONENT_PROFILES.average, rng), sampleOpponent(OPPONENT_PROFILES.champion, rng), config, true, rng);
+        expect(r.history!.length).toBe(61);
+        expect(r.playOrder!.length).toBe(60);
+        expect(r.ddEvents!.length).toBe(3);
+        for (const round of [0, 30]) {
+          const order = r.playOrder!.slice(round, round + 30);
+          expect(new Set(order).size).toBe(30);
+          for (const idx of order) { expect(idx).toBeGreaterThanOrEqual(0); expect(idx).toBeLessThan(30); }
+        }
+      }
+    });
+
+    it('a seeking controller uncovers DDs before a top-down one would (row 3, the DJ mode, comes first under the empirical prior)', () => {
+      const you = makePlayer(0.8, 0.9, 0.7, 0.6);
+      const config: SimConfig = { ...DEFAULT_CONFIG, squareSelection: 'ddSeek', ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS };
+      const r = simulateRound([you, you, you], [0, 0, 0], buildFullBoard(DJ_VALUES), 2, 'DJ', config, true, mulberry32(8), 0);
+      // First pick by the seeker: row 3 ($1600) of column 0.
+      expect(r.playOrder[0]).toBe(3);
+    });
+
+    it("'ddSeek' vs 'default' for a strong player vs Average opponents: paired seeds, measured lift (see comment)", () => {
+      // Per-game seeds (mulberry32(base + i·7919)) so both strategies see
+      // the same opponents and the same J-round DD placement in game i —
+      // common random numbers, then the streams diverge at the first
+      // differing square choice.
+      //
+      // Measured at 20,000 paired games (SE of the paired difference ≈ 0.5pp):
+      //   Tesauro-like config (difficultyScaling: false — DD accuracy =
+      //   precision, as the paper models DD accuracy as its own flat
+      //   parameter):   default 66.66% → ddSeek 76.66%   lift +10.0pp
+      //   Production config (difficulty scaling on, 'aggressive' 75%
+      //   wagers, empirical priors): 51.44% → 52.66%     lift +1.2pp
+      //   Production vs Champion opponents:     31.19% → 34.76%  lift +3.6pp
+      //   Production, 'conservative' wagers:    53.27% → 56.54%  lift +3.3pp
+      //   Your DDs/game in every case: ≈1.29 → ≈2.0 (of 3).
+      // The production lift is small because the engine's difficulty-by-row
+      // multiplier applies to DDs too: a bottom-row DD is answered at ~64%,
+      // so at 75%-of-score wagers it is close to EV-neutral with high
+      // variance — finding more of them barely helps a favorite. Under the
+      // paper's flat DD accuracy the effect is the "overwhelmingly the top
+      // factor" the paper reports. The clear-margin assertion is on that
+      // config; production is asserted non-negative with its number logged.
+      const you = makePlayer(0.8, 0.9, 0.7, 0.6);
+      const run = (base: SimConfig, n: number) => {
+        const cfgDefault: SimConfig = { ...base, boardControl: 'tracked', squareSelection: 'default' };
+        const cfgSeek: SimConfig = { ...base, boardControl: 'tracked', squareSelection: 'ddSeek' };
+        let wD = 0, wS = 0, ddD = 0, ddS = 0;
+        for (let i = 0; i < n; i++) {
+          for (const seek of [false, true]) {
+            const rng = mulberry32(1000 + i * 7919);
+            const o1 = sampleOpponent(OPPONENT_PROFILES.average, rng);
+            const o2 = sampleOpponent(OPPONENT_PROFILES.average, rng);
+            const r = simulateGame(you, o1, o2, seek ? cfgSeek : cfgDefault, true, rng);
+            const mine = r.ddEvents!.filter(e => e.player === 0).length;
+            if (seek) { if (r.winner === 0) wS++; ddS += mine; } else { if (r.winner === 0) wD++; ddD += mine; }
+          }
+        }
+        return { def: wD / n, seek: wS / n, ddDef: ddD / n, ddSeek: ddS / n };
+      };
+      const n = 8000;
+      const flat = run({ ...DEFAULT_CONFIG, ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS, difficultyScaling: false }, n);
+      const prod = run({ ...DEFAULT_CONFIG, ddRowWeights: EMPIRICAL_DD_ROW_WEIGHTS }, n);
+      const fmt = (x: { def: number; seek: number; ddDef: number; ddSeek: number }) =>
+        `default ${(x.def * 100).toFixed(2)}% → ddSeek ${(x.seek * 100).toFixed(2)}% (lift ${((x.seek - x.def) * 100).toFixed(2)}pp); your DDs/game ${x.ddDef.toFixed(2)} → ${x.ddSeek.toFixed(2)}`;
+      console.log(`[ddSeek lift, ${n} paired games]\n  flat DD accuracy: ${fmt(flat)}\n  production:       ${fmt(prod)}`);
+
+      // Mechanism: seeking finds materially more DDs either way.
+      expect(flat.ddSeek - flat.ddDef).toBeGreaterThan(0.4);
+      expect(prod.ddSeek - prod.ddDef).toBeGreaterThan(0.4);
+      // Clear margin under the paper's DD-accuracy model (≥ +5pp; measured +10pp).
+      expect(flat.seek - flat.def).toBeGreaterThan(0.05);
+      // Production: non-negative (measured +1.2pp at 20k, +1.5pp here).
+      expect(prod.seek - prod.def).toBeGreaterThan(0);
+    }, 120000);
+  });
+  describe("'squareSelection' dimension (Explorer axis candidate)", () => {
+    it('is registered with the registry shape: two-valued strategy, default 0 = top-down', () => {
+      const dim = DIMENSIONS.squareSelection;
+      expect(dim.type).toBe('strategy');
+      expect(dim.range).toEqual([0, 1]);
+      expect(dim.defaultValue).toBe(0);
+      expect(dim.format(0)).toBe('Top-down');
+      expect(dim.format(1)).toBe('DD seeking');
+      expect(dim.toParams(0, {}).sim?.squareSelection).toBe('default');
+      expect(dim.toParams(0.49, {}).sim?.squareSelection).toBe('default');
+      expect(dim.toParams(0.5, {}).sim?.squareSelection).toBe('ddSeek');
+      expect(dim.toParams(1, {}).sim?.squareSelection).toBe('ddSeek');
+    });
+
+    it('as a swept axis it sets config.squareSelection; left unpinned it stays inert (legacy path)', () => {
+      const seek = buildSimParams('squareSelection', 'buzzerSpeed', 1, 0.6, {});
+      expect(seek.config.squareSelection).toBe('ddSeek');
+      expect(resolveBoardControl(seek.config)).toBe('tracked');
+
+      const top = buildSimParams('squareSelection', 'buzzerSpeed', 0, 0.6, {});
+      expect(top.config.squareSelection).toBe('default');
+      expect(resolveBoardControl(top.config)).toBe('leader');
+
+      // Not an axis and not in any preset's pinned set ⇒ never applied, so
+      // every existing sweep keeps the regression-locked legacy order.
+      const legacy = buildSimParams('knowledge', 'buzzerSpeed', 0.4, 0.6, { squareSelection: 1 });
+      expect(legacy.config.squareSelection).toBeUndefined();
+      expect(resolveBoardControl(legacy.config)).toBe('leader');
+    });
   });
 });
