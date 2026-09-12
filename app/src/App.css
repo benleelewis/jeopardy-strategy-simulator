@@ -73,6 +73,23 @@
   gap: 8px;
 }
 
+/* HeatMap root: matches the component's former inline style exactly
+   (position:relative; display:inline-block) so this is a no-op by default —
+   only the P3 mobile media query below overrides display/width. */
+.heatmap-root {
+  position: relative;
+  display: inline-block;
+}
+
+/* SVG carries width/height=560 attributes + a matching viewBox (identity
+   mapping at that size, so desktop is unaffected); the mobile query makes
+   it fluid and the viewBox lets its internal d3-drawn content (and the
+   drag/pointer math) scale with it automatically. */
+.heatmap-svg {
+  max-width: 100%;
+  height: auto;
+}
+
 /* P-1: axis-preset pills */
 .axis-pills {
   display: flex;
@@ -173,6 +190,19 @@
   background: var(--bg-panel);
   overflow-y: auto;
   max-height: calc(100vh - 100px);
+}
+
+/* P3 mobile Explorer layout: side-panel content is grouped into two native
+   <details>/<summary> sections (App.tsx) so it's collapsible on phones with
+   no JS. Both stay `open` by default and the <summary> is hidden here —
+   so at any width above the mobile breakpoint this is a no-op: the details
+   element renders exactly like the plain wrapper divs it replaced. */
+.side-section {
+  display: block;
+}
+
+.side-section > summary {
+  display: none;
 }
 
 /* Games tab */
@@ -348,5 +378,67 @@
     border-left: none;
     border-top: 1px solid var(--border);
     max-height: none;
+  }
+}
+
+/* P3 — Mobile Explorer layout (TODOS.md). Below 768px the 3-column
+   Explorer (controls | heat map | stats/marginal returns) stacks:
+   heat map first at full width, then the side-panel content below it as
+   two collapsible <details> sections (Stats & Marginal Returns, Controls).
+   The heat map itself scales via its own viewBox (HeatMap.tsx) rather than
+   a fixed 560px box, so d3's drag/pointer math keeps working with touch. */
+@media (max-width: 768px) {
+  body {
+    overflow-x: hidden;
+  }
+
+  .viz-container {
+    padding: 12px;
+    justify-content: flex-start;
+  }
+
+  .viz-stack {
+    width: 100%;
+  }
+
+  .heatmap-root {
+    display: block;
+    width: 100%;
+  }
+
+  .side-section > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 44px; /* a11y touch target */
+    padding: 12px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-h);
+    cursor: pointer;
+    list-style: none;
+  }
+
+  .side-section > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .side-section > summary::after {
+    content: '+';
+    font-size: 16px;
+    color: var(--text-muted);
+  }
+
+  .side-section[open] > summary::after {
+    content: '\2212';
+  }
+
+  .side-section {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .side-section:last-child {
+    border-bottom: none;
   }
 }

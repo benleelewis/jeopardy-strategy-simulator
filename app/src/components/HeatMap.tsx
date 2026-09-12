@@ -510,11 +510,13 @@ export function HeatMap({
   const yDim = DIMENSIONS[yAxis];
 
   return (
-    <div style={{ position: 'relative', display: 'inline-block' }}>
+    <div className="heatmap-root">
       <svg
         ref={svgRef}
+        className="heatmap-svg"
         width={WIDTH}
         height={HEIGHT}
+        viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
         style={{ touchAction: 'none' }}
         role="img"
         aria-label={`Win rate heat map, ${xDim.label} by ${yDim.label}`}
@@ -543,8 +545,12 @@ export function HeatMap({
           aria-hidden="true"
           onAnimationEnd={() => setPulsing(false)}
           style={{
-            left: MARGIN.left + xScale(position.x),
-            top: MARGIN.top + yScale(position.y),
+            // Percentages (of the WIDTH/HEIGHT user-unit box), not raw px:
+            // resolves against the heatmap's actual rendered size, so this
+            // stays aligned with the SVG's own viewBox-scaled content at
+            // any CSS size (identical to the old px values at 560×560).
+            left: `${((MARGIN.left + xScale(position.x)) / WIDTH) * 100}%`,
+            top: `${((MARGIN.top + yScale(position.y)) / HEIGHT) * 100}%`,
           }}
         />
       )}
@@ -555,7 +561,8 @@ export function HeatMap({
         style={{
           position: 'absolute',
           bottom: 8,
-          left: MARGIN.left + INNER_W / 2,
+          // Percentage of WIDTH, not raw px — see you-pulse comment above.
+          left: `${((MARGIN.left + INNER_W / 2) / WIDTH) * 100}%`,
           transform: 'translateX(-50%)',
           background: 'none',
           border: 'none',
@@ -582,7 +589,8 @@ export function HeatMap({
         onClick={(e) => handleAxisLabelClick('y', e)}
         style={{
           position: 'absolute',
-          top: MARGIN.top + INNER_H / 2,
+          // Percentage of HEIGHT, not raw px — see you-pulse comment above.
+          top: `${((MARGIN.top + INNER_H / 2) / HEIGHT) * 100}%`,
           left: 4,
           transform: 'translateY(-50%) rotate(-90deg)',
           transformOrigin: 'center center',

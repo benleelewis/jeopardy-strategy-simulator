@@ -703,39 +703,50 @@ export default function App() {
               </div>
             </div>
             <div className="side-panel">
-              <StatsPanel
-                position={position}
-                winRate={winRate}
-                xAxis={xAxis}
-                yAxis={yAxis}
-              />
-              <div style={{ padding: '12px 16px' }}>
-                <MarginalReturns
+              {/* P3 mobile Explorer layout (TODOS.md): grouped into native
+                  <details>/<summary> sections so they're collapsible on
+                  phones with no JS. Both stay `open` — on wider screens the
+                  <summary> is hidden (App.css) so this renders exactly like
+                  the flat list of panels it replaces. */}
+              <details className="side-section" open>
+                <summary>Stats &amp; Marginal Returns</summary>
+                <StatsPanel
+                  position={position}
+                  winRate={winRate}
                   xAxis={xAxis}
                   yAxis={yAxis}
-                  position={position}
-                  pinnedValues={pinnedValues}
-                  config={config}
                 />
-              </div>
-              {/* E-7 DD heat strip: independent of V — driven entirely by
-                  clue-stats.json; hidden entirely when unavailable. */}
-              <DDHeatStrip clueStats={clueStats} />
-              <ControlsPanel
-                xAxis={xAxis}
-                yAxis={yAxis}
-                pinnedValues={pinnedValues}
-                onPinnedChange={handlePinnedChange}
-                includeFJ={includeFJ}
-                onFJChange={setIncludeFJ}
-                theme={theme}
-                onThemeChange={setTheme}
-                ddStrategy={ddStrategy}
-                onDdStrategyChange={setDdStrategy}
-                equityBuildStatus={equityBuildStatus}
-                equityBuildProgress={equityBuildProgress}
-                onCancelEquityBuild={handleCancelEquityBuild}
-              />
+                <div style={{ padding: '12px 16px' }}>
+                  <MarginalReturns
+                    xAxis={xAxis}
+                    yAxis={yAxis}
+                    position={position}
+                    pinnedValues={pinnedValues}
+                    config={config}
+                  />
+                </div>
+                {/* E-7 DD heat strip: independent of V — driven entirely by
+                    clue-stats.json; hidden entirely when unavailable. */}
+                <DDHeatStrip clueStats={clueStats} />
+              </details>
+              <details className="side-section" open>
+                <summary>Controls</summary>
+                <ControlsPanel
+                  xAxis={xAxis}
+                  yAxis={yAxis}
+                  pinnedValues={pinnedValues}
+                  onPinnedChange={handlePinnedChange}
+                  includeFJ={includeFJ}
+                  onFJChange={setIncludeFJ}
+                  theme={theme}
+                  onThemeChange={setTheme}
+                  ddStrategy={ddStrategy}
+                  onDdStrategyChange={setDdStrategy}
+                  equityBuildStatus={equityBuildStatus}
+                  equityBuildProgress={equityBuildProgress}
+                  onCancelEquityBuild={handleCancelEquityBuild}
+                />
+              </details>
             </div>
           </>
         ) : (
