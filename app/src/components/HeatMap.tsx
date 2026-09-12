@@ -31,6 +31,12 @@ interface Props {
    *  the active selection at all. */
   equityBuildStatus?: 'idle' | 'building' | 'ready' | 'failed';
   equityBuildProgress?: number;
+  /** P-1C "speed vs accuracy" control: games/cell for the REFINED (second)
+   *  pass only — the fast pass (150 games/cell, resolution 20) is always
+   *  fixed. Defaults to 450 ("Normal"), matching the pre-existing hardcoded
+   *  refined-pass count, so omitting this prop reproduces today's exact
+   *  behavior/timing. */
+  refinedGamesPerCell?: number;
 }
 
 const WIDTH = 560;
@@ -54,6 +60,7 @@ export function HeatMap({
   pulseToken,
   equityBuildStatus = 'idle',
   equityBuildProgress = 0,
+  refinedGamesPerCell = 450,
 }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const workerRef = useRef<Worker | null>(null);
@@ -137,7 +144,13 @@ export function HeatMap({
       gamesPerCell: 150,
     });
     setResolution(20);
-  }, [xAxis, yAxis, pinnedValues, config]);
+    // refinedGamesPerCell isn't read here (the fast pass is always fixed at
+    // 150/cell) but is included so changing the "Speed vs Accuracy" control
+    // restarts the fast+refined cycle from scratch — otherwise, if the
+    // refined pass had already completed (resolution === 40), the second
+    // effect below would never re-fire since its own guard requires
+    // resolution === 20.
+  }, [xAxis, yAxis, pinnedValues, config, refinedGamesPerCell]);
 
   // When fast pass completes, start refined pass.
   //
@@ -159,11 +172,11 @@ export function HeatMap({
         yAxis,
         pinnedValues,
         config,
-        gamesPerCell: 450,
+        gamesPerCell: refinedGamesPerCell,
       });
       setResolution(40);
     }
-  }, [grid, resolution, computing]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [grid, resolution, computing, refinedGamesPerCell]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // P-3: fire the one-shot pulse whenever the bridge token bumps.
   useEffect(() => {
