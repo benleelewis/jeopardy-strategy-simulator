@@ -18,7 +18,7 @@
 - [x] P-4: YourNumber above GamesControls
 - [x] Deploy to Vercel — live at https://jeopardy-strategy-simulator.vercel.app
 - [ ] **C1 checkpoint**: Ben re-rates the Explorer on the deployed app (target ≥7/10)
-- [ ] Polish: heat map title overlaps top axis label (smoke-test finding)
+- [x] Polish: heat map title overlap — real cause was the YOU marker drawn untransformed for a frame on grid rebuild; fixed 2026-09-11
 
 ## Phase 0: Setup
 - [x] Read all PDFs and handoff documents
@@ -59,7 +59,7 @@
 - [x] Opponent field strength slider (Average → Champion → Grand Champion)
 - [x] DD strategy selector (off / conservative / aggressive)
 - [x] FJ toggle (on/off)
-- [ ] Simulation count slider (speed vs accuracy)
+- [x] Simulation count slider (speed vs accuracy) — Fast/Normal/Precise, 2026-09-11
 - [x] Theme toggle (clean / Jeopardy blue-gold via CSS variables)
 - [x] Cancel in-flight Worker when settings change
 
