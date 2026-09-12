@@ -10,6 +10,8 @@
  *   - Wrong answer penalties (lose points + rebound chance)
  *   - Daily Doubles (1 in J, 2 in DJ, bottom-row bias)
  *   - Final Jeopardy (score-position wagering, correlated accuracy)
+ *   - Board control (opt-in `'tracked'`: real rules for who picks the next
+ *     square and who therefore hits a Daily Double)
  *
  * Randomness: every stochastic function takes an optional `rng: () => number`
  * (a drop-in replacement for Math.random, e.g. `mulberry32(seed)` below).
@@ -59,8 +61,20 @@ export type NonEquityDDStrategy = Exclude<DDStrategy, 'equity'>;
  *   trailing (or negative-score) players occasionally control the board too.
  *   Without this option, deterministic leader-control biases any V(S) built
  *   from rollouts: "trailing players never get DDs" isn't true in real games.
+ * - 'tracked': REAL board control per the show's rules. The controller is
+ *   tracked clue by clue (see `simulateRound`): the last player to answer
+ *   correctly controls the board; if nobody buzzed or everyone was wrong,
+ *   the previous controller keeps it; the player who takes a DD keeps
+ *   control whether right or wrong. The controller both chooses the next
+ *   square (lowest unplayed index — the fixed top-down order) and is the
+ *   one who hits a DD when they uncover it. Round starts: the J round's first selector
+ *   is drawn uniformly (the returning champion's podium is not modeled);
+ *   the DJ round's first selector is the lowest-scoring player after J
+ *   (real rule; ties → lowest player index).
+ *   'leader' / 'score-weighted' remain as the legacy de-biasing shims
+ *   (PLAN.md E-0) with the original fixed top-down clue order.
  */
-export type BoardControl = 'leader' | 'score-weighted';
+export type BoardControl = 'leader' | 'score-weighted' | 'tracked';
 
 export interface SimConfig {
   /** Your (player 0) DD wagering strategy. */
@@ -129,6 +143,15 @@ export interface SimConfig {
   ddRowWeights?: { J: number[]; DJ: number[] };
 }
 
+/**
+ * The board-control model actually in effect for a config: the configured
+ * value, defaulting to the `'leader'` shim. Exported so callers/tests can
+ * see which model a config resolves to.
+ */
+export function resolveBoardControl(config: SimConfig): BoardControl {
+  return config.boardControl ?? 'leader';
+}
+
 export const DEFAULT_CONFIG: SimConfig = {
   ddStrategy: 'aggressive',
   includeFJ: true,
@@ -143,6 +166,19 @@ export interface GameResult {
   /** Clue-by-clue score history for replay: [clueIndex][playerIndex] */
   history?: [number, number, number][];
   ddEvents?: DDEvent[];
+  /**
+   * Board index of each clue in the order it was played, one entry per
+   * regular/DD clue (FJ has none), aligned with `history` minus the FJ
+   * entry. Under legacy board control this is simply 0..29 per round.
+   * Only populated when `trackHistory` is true. Additive.
+   */
+  playOrder?: number[];
+  /**
+   * Who controlled the board (chose the square) for each played clue,
+   * aligned with `playOrder`. `-1` under legacy board control, where no
+   * controller is tracked between clues. Only with `trackHistory`.
+   */
+  controllers?: number[];
 }
 
 export interface DDEvent {
@@ -501,6 +537,137 @@ export function buildFullBoard(values: number[]): number[] {
   return clues;
 }
 
+// ─── Tracked board control: board model, DD placement, square selection ──
+
+/**
+ * A round's board under `'tracked'` board control. Squares are addressed
+ * by index into the round's clue list (the same index space as
+ * `DDEvent.clueIndex`). Typed arrays: the per-clue selection scan reads
+ * them in a tight loop and allocates nothing.
+ */
+export interface RoundBoard {
+  /** Number of squares (≤ 30). */
+  n: number;
+  /** Face value per square. */
+  values: number[];
+  /** Row per square (0 = top … 4 = bottom); -1 if the value is not one of
+   *  the round's five row values. */
+  rows: Int8Array;
+  /** Column per square (0..5), or -1 when unknown (a partial board entered
+   *  via `simulateFromState` carries values only). */
+  cols: Int8Array;
+  /** 1 once the square has been played. */
+  played: Uint8Array;
+  /** 1 if the square holds a Daily Double (placement is hidden from the
+   *  players; square selection never reads it). */
+  isDD: Uint8Array;
+  playedCount: number;
+  /** Lowest index that might still be unplayed — the 'default' order's cursor. */
+  nextDefault: number;
+  /** Daily Doubles placed on this board and not yet uncovered. */
+  ddRemaining: number;
+  /** Bitmask of columns whose DD has already been uncovered. A DJ round's
+   *  two DDs never share a column, so these columns are DD-free. */
+  ddFoundColMask: number;
+}
+
+/**
+ * Build a `RoundBoard` from a flat clue list. When `cols` is omitted and the
+ * list is a full 30-square board (as built by `buildFullBoard`: category-
+ * major, 5 rows per category), columns are derived as `floor(i / 5)`;
+ * otherwise columns are unknown (-1) and the same-column DD constraint is
+ * simply not applied.
+ */
+export function createRoundBoard(values: number[], round: 'J' | 'DJ', cols?: ArrayLike<number>): RoundBoard {
+  const n = values.length;
+  const roundValues = round === 'J' ? J_VALUES : DJ_VALUES;
+  const rows = new Int8Array(n);
+  const colArr = new Int8Array(n);
+  const fullBoard = n === 30 && cols === undefined;
+  for (let i = 0; i < n; i++) {
+    rows[i] = roundValues.indexOf(values[i]);
+    colArr[i] = cols !== undefined ? cols[i] : fullBoard ? Math.floor(i / 5) : -1;
+  }
+  return {
+    n,
+    values,
+    rows,
+    cols: colArr,
+    played: new Uint8Array(n),
+    isDD: new Uint8Array(n),
+    playedCount: 0,
+    nextDefault: 0,
+    ddRemaining: 0,
+    ddFoundColMask: 0,
+  };
+}
+
+/**
+ * Place `count` Daily Doubles on a tracked-mode board. Each DD lands on a
+ * square with probability ∝ rowWeights[row] over the squares still
+ * eligible — not already a DD and (when columns are known) not in a column
+ * that already holds one (Tesauro 2012: "the two second-round DDs never
+ * appear in the same column"; row set independently of column).
+ *
+ * On a full board this is the legacy `pickDDIndices` distribution for the
+ * first DD (row ∝ weight, column uniform) plus the real-rules column
+ * constraint for the second. On a partial board it is the Bayesian
+ * posterior of a DD placed on the full board and not yet uncovered
+ * (∝ weight per remaining SQUARE) — the model a Bayesian DD seeker would
+ * compute, so a seeking strategy built on top of this is calibrated rather
+ * than fooled by its own simulator. (Legacy mode's per-row renormalization
+ * is left untouched for the regression lock.)
+ */
+function placeDailyDoubles(board: RoundBoard, count: number, rowWeights: number[], rng: () => number): void {
+  const { n, rows, cols, isDD } = board;
+  for (let k = 0; k < count; k++) {
+    let z = 0;
+    for (let i = 0; i < n; i++) {
+      if (isDD[i] === 1) continue;
+      if (cols[i] >= 0 && (board.ddFoundColMask & (1 << cols[i])) !== 0) continue;
+      const r = rows[i];
+      if (r >= 0) z += rowWeights[r];
+    }
+    if (z <= 0) break; // nowhere eligible left (or all-zero weights)
+    let draw = rng() * z;
+    let placed = -1;
+    for (let i = 0; i < n; i++) {
+      if (isDD[i] === 1) continue;
+      if (cols[i] >= 0 && (board.ddFoundColMask & (1 << cols[i])) !== 0) continue;
+      const r = rows[i];
+      if (r < 0) continue;
+      draw -= rowWeights[r];
+      placed = i;
+      if (draw <= 0) break;
+    }
+    if (placed < 0) break;
+    isDD[placed] = 1;
+    board.ddRemaining++;
+    // Reserve the column so the next DD avoids it; the mask is reset to
+    // "found so far" once placement is done (see simulateRound).
+    if (cols[placed] >= 0) board.ddFoundColMask |= 1 << cols[placed];
+  }
+  board.ddFoundColMask = 0;
+}
+
+/** Lowest unplayed index: top-to-bottom within a category, categories
+ *  left-to-right — today's fixed clue order. */
+function chooseSquareDefault(board: RoundBoard): number {
+  const { played } = board;
+  let i = board.nextDefault;
+  while (i < board.n && played[i] === 1) i++;
+  board.nextDefault = i;
+  return i;
+}
+
+/** Real rule: the lowest-scoring player after the Jeopardy round selects
+ *  first in Double Jeopardy (ties → lowest player index). */
+export function lowestScoreIndex(scores: [number, number, number]): number {
+  let idx = 0;
+  for (let i = 1; i < 3; i++) if (scores[i] < scores[idx]) idx = i;
+  return idx;
+}
+
 /**
  * Simulate a (possibly partial) round of Jeopardy or Double Jeopardy.
  *
@@ -508,6 +675,14 @@ export function buildFullBoard(values: number[]): number[] {
  * board for a fresh round, or a shorter list for a partial board entered
  * via `simulateFromState`. `ddCount` is how many (still-unrevealed) Daily
  * Doubles remain to be placed among them.
+ *
+ * Board control (see `BoardControl`): under the legacy shims the clues are
+ * played in list order and `pickController` decides who hits a DD — the
+ * regression-locked path, byte-identical to the original engine. Under
+ * `'tracked'` the controller is a real tracked player who picks each
+ * square (top-down order for now); `initialController` is
+ * who starts the round (`-1` ⇒ one uniform draw — the J-round rule when
+ * no returning champion is modeled; callers pass `lowestScoreIndex` for DJ).
  *
  * DRY: handles both rounds with parameterized clue values.
  * Returns updated scores and events.
@@ -521,34 +696,82 @@ export function simulateRound(
   config: SimConfig,
   trackHistory: boolean,
   rng: () => number = Math.random,
-): { scores: [number, number, number]; history: [number, number, number][]; ddEvents: DDEvent[] } {
+  initialController = -1,
+): {
+  scores: [number, number, number];
+  history: [number, number, number][];
+  ddEvents: DDEvent[];
+  playOrder: number[];
+  controllers: number[];
+} {
   const history: [number, number, number][] = [];
   const ddEvents: DDEvent[] = [];
+  const playOrder: number[] = [];
+  const controllers: number[] = [];
 
   const clues = clueValues;
+  const n = clues.length;
   const roundValues = round === 'J' ? J_VALUES : DJ_VALUES;
   const maxClueValue = roundValues[roundValues.length - 1];
-  const boardControl: BoardControl = config.boardControl ?? 'leader';
+  const boardControl = resolveBoardControl(config);
+  const tracked = boardControl === 'tracked';
 
-  // Place Daily Doubles (renormalized over the rows still in play — see
-  // pickDDIndices). E-6: config.ddRowWeights[round], when present, replaces
-  // the DD_ROW_WEIGHTS folklore fallback (pickDDIndices's own default).
-  const ddIndices = config.ddStrategy !== 'off'
-    ? pickDDIndices(clues, round, ddCount, rng, config.ddRowWeights?.[round])
-    : new Set<number>();
+  // Place Daily Doubles. Legacy: pickDDIndices (renormalized over the rows
+  // still in play; E-6: config.ddRowWeights[round] replaces the
+  // DD_ROW_WEIGHTS folklore fallback). Tracked: placeDailyDoubles on a
+  // RoundBoard, same priors, plus the real-rules column constraint.
+  const rowWeights = config.ddRowWeights?.[round] ?? DD_ROW_WEIGHTS;
+  let ddIndices: Set<number> | null = null;
+  let board: RoundBoard | null = null;
+  let controller = -1;
+  if (tracked) {
+    board = createRoundBoard(clues, round);
+    if (config.ddStrategy !== 'off') placeDailyDoubles(board, ddCount, rowWeights, rng);
+    controller = initialController >= 0 && initialController < 3
+      ? initialController
+      : Math.floor(rng() * 3);
+  } else {
+    ddIndices = config.ddStrategy !== 'off'
+      ? pickDDIndices(clues, round, ddCount, rng, config.ddRowWeights?.[round])
+      : new Set<number>();
+  }
 
-  for (let i = 0; i < clues.length; i++) {
+  for (let played = 0; played < n; played++) {
+    // Which square is played next: list order (legacy) or the tracked
+    // controller's choice.
+    let i: number;
+    let isDD: boolean;
+    if (board !== null) {
+      i = chooseSquareDefault(board);
+      board.played[i] = 1;
+      board.playedCount++;
+      isDD = board.isDD[i] === 1;
+      if (isDD) {
+        board.ddRemaining--;
+        if (board.cols[i] >= 0) board.ddFoundColMask |= 1 << board.cols[i];
+      }
+    } else {
+      i = played;
+      isDD = ddIndices!.has(i);
+    }
+    if (trackHistory) {
+      playOrder.push(i);
+      controllers.push(controller);
+    }
+
     const value = clues[i];
     const dm = effectiveDifficultyMultiplier(value, round, config);
+    const cluesRemainingAfter = n - played - 1;
 
-    if (ddIndices.has(i) && config.ddStrategy !== 'off') {
-      // Daily Double: board control decides who gets it (see BoardControl).
-      const controller = pickController(scores, boardControl, rng);
-      const player = players[controller];
+    if (isDD && config.ddStrategy !== 'off') {
+      // Daily Double: the tracked controller uncovered it; under the legacy
+      // shims board control is modeled by pickController (see BoardControl).
+      const ddController = tracked ? controller : pickController(scores, boardControl, rng);
+      const player = players[ddController];
       // Per-player DD strategy: your (player 0) wagering heuristic can
       // differ from opponents'. opponentDdStrategy defaults to ddStrategy
       // for backward compatibility with configs written before this split.
-      const controllerStrategy = controller === 0
+      const controllerStrategy = ddController === 0
         ? config.ddStrategy
         : (config.opponentDdStrategy ?? config.ddStrategy);
       const adjustedP = player.p * dm;
@@ -561,49 +784,49 @@ export function simulateRound(
       // valueTable both fall back to 'aggressive' — documented, never a
       // silent min-bet.
       let wager: number;
-      if (controller === 0 && controllerStrategy === 'equity') {
+      if (ddController === 0 && controllerStrategy === 'equity') {
         if (config.valueTable) {
-          const remainingAfter = clues.slice(i + 1);
           wager = equityWager(
             { knowledge: player.b * player.p, buzzerSpeed: player.buzzerSpeed },
             scores,
-            remainingAfter.length,
+            cluesRemainingAfter,
             adjustedP,
             config.valueTable,
           );
         } else {
-          wager = ddWager('aggressive', scores[controller], maxClueValue, config.ddWagerFraction);
+          wager = ddWager('aggressive', scores[ddController], maxClueValue, config.ddWagerFraction);
         }
       } else {
         const safeStrategy: NonEquityDDStrategy = controllerStrategy === 'equity' ? 'aggressive' : controllerStrategy;
-        wager = ddWager(safeStrategy, scores[controller], maxClueValue, config.ddWagerFraction);
+        wager = ddWager(safeStrategy, scores[ddController], maxClueValue, config.ddWagerFraction);
       }
 
       const correct = rng() < adjustedP;
-      const scoreBefore = scores[controller];
+      const scoreBefore = scores[ddController];
       // Full 3-player snapshot before mutation — see DDEvent.scoresBefore doc.
       const scoresBeforeSnapshot: [number, number, number] = [...scores] as [number, number, number];
 
       if (correct) {
-        scores[controller] += wager;
+        scores[ddController] += wager;
       } else {
-        scores[controller] -= wager;
+        scores[ddController] -= wager;
       }
+      // Real rule: the player who took the DD keeps the board either way —
+      // `controller` is unchanged.
 
       ddEvents.push({
         round,
         clueIndex: i,
-        player: controller,
+        player: ddController,
         wager,
         correct,
         scoreBefore,
-        scoreAfter: scores[controller],
+        scoreAfter: scores[ddController],
         clueValue: value,
         scoresBefore: scoresBeforeSnapshot,
         // Same quantity fed to equityWager's cluesRemainingAfter just above
-        // (clues.slice(i + 1).length) — kept consistent for GameDetail's
-        // out-of-engine recomputation.
-        cluesRemainingAfter: clues.length - i - 1,
+        // — kept consistent for GameDetail's out-of-engine recomputation.
+        cluesRemainingAfter,
         adjustedP,
       });
     } else {
@@ -621,6 +844,8 @@ export function simulateRound(
 
       if (winner >= 0) {
         scores[winner] += value;
+        // Real rule: a correct answer takes the board.
+        if (tracked) controller = winner;
       } else if (attempts.some(a => a)) {
         // Someone buzzed but got it wrong — wrong answer penalty
         // Pick the fastest buzzer among those who attempted
@@ -648,10 +873,14 @@ export function simulateRound(
             const reboundWinner = resolveBuzzer(reboundAccuracy, players, rng);
             if (reboundWinner >= 0) {
               scores[reboundWinner] += value;
+              // A correct rebound takes the board too.
+              if (tracked) controller = reboundWinner;
             }
           }
         }
       }
+      // Nobody right (no buzz, or wrong with no successful rebound): the
+      // previous controller keeps the board — `controller` is unchanged.
     }
 
     if (trackHistory) {
@@ -659,7 +888,7 @@ export function simulateRound(
     }
   }
 
-  return { scores, history, ddEvents };
+  return { scores, history, ddEvents, playOrder, controllers };
 }
 
 /**
@@ -867,18 +1096,29 @@ export function simulateGame(
   let scores: [number, number, number] = [0, 0, 0];
   let allHistory: [number, number, number][] = [];
   let allDDEvents: DDEvent[] = [];
+  let allPlayOrder: number[] = [];
+  let allControllers: number[] = [];
 
-  // Jeopardy Round (1 DD over the full 30-clue board)
-  const jResult = simulateRound(players, scores, buildFullBoard(J_VALUES), 1, 'J', config, trackHistory, rng);
+  // Jeopardy Round (1 DD over the full 30-clue board). First selector:
+  // uniform draw under tracked board control (no returning champion is
+  // modeled); ignored under the legacy shims.
+  const jResult = simulateRound(players, scores, buildFullBoard(J_VALUES), 1, 'J', config, trackHistory, rng, -1);
   scores = jResult.scores;
   allHistory = allHistory.concat(jResult.history);
   allDDEvents = allDDEvents.concat(jResult.ddEvents);
+  allPlayOrder = allPlayOrder.concat(jResult.playOrder);
+  allControllers = allControllers.concat(jResult.controllers);
 
-  // Double Jeopardy Round (2 DDs over the full 30-clue board)
-  const djResult = simulateRound(players, scores, buildFullBoard(DJ_VALUES), 2, 'DJ', config, trackHistory, rng);
+  // Double Jeopardy Round (2 DDs over the full 30-clue board). Real rule:
+  // the lowest-scoring player after J selects first.
+  const djResult = simulateRound(
+    players, scores, buildFullBoard(DJ_VALUES), 2, 'DJ', config, trackHistory, rng, lowestScoreIndex(scores),
+  );
   scores = djResult.scores;
   allHistory = allHistory.concat(djResult.history);
   allDDEvents = allDDEvents.concat(djResult.ddEvents);
+  allPlayOrder = allPlayOrder.concat(djResult.playOrder);
+  allControllers = allControllers.concat(djResult.controllers);
 
   // Final Jeopardy
   if (config.includeFJ) {
@@ -896,6 +1136,8 @@ export function simulateGame(
     winner,
     history: trackHistory ? allHistory : undefined,
     ddEvents: trackHistory ? allDDEvents : undefined,
+    playOrder: trackHistory ? allPlayOrder : undefined,
+    controllers: trackHistory ? allControllers : undefined,
   };
 }
 
@@ -908,6 +1150,12 @@ export interface SimState {
   round: 'J' | 'DJ';
   remainingClueValues: number[];
   remainingDDCount: number;
+  /**
+   * Who controls the board as play resumes (tracked board control only;
+   * ignored under the legacy shims). Omitted ⇒ one uniform draw. Optional
+   * and additive — existing states are unaffected.
+   */
+  controller?: number;
 }
 
 /**
@@ -932,26 +1180,33 @@ export function simulateFromState(
   let scores: [number, number, number] = [...state.scores];
   let allHistory: [number, number, number][] = [];
   let allDDEvents: DDEvent[] = [];
+  let allPlayOrder: number[] = [];
+  let allControllers: number[] = [];
 
   // Finish whatever's left of the round we're currently in.
   if (state.remainingClueValues.length > 0) {
     const result = simulateRound(
       players, scores, state.remainingClueValues, state.remainingDDCount,
-      state.round, config, trackHistory, rng,
+      state.round, config, trackHistory, rng, state.controller ?? -1,
     );
     scores = result.scores;
     allHistory = allHistory.concat(result.history);
     allDDEvents = allDDEvents.concat(result.ddEvents);
+    allPlayOrder = allPlayOrder.concat(result.playOrder);
+    allControllers = allControllers.concat(result.controllers);
   }
 
-  // If we started mid-Jeopardy, Double Jeopardy is played in full next.
+  // If we started mid-Jeopardy, Double Jeopardy is played in full next
+  // (lowest score after J selects first — the real rule).
   if (state.round === 'J') {
     const djResult = simulateRound(
-      players, scores, buildFullBoard(DJ_VALUES), 2, 'DJ', config, trackHistory, rng,
+      players, scores, buildFullBoard(DJ_VALUES), 2, 'DJ', config, trackHistory, rng, lowestScoreIndex(scores),
     );
     scores = djResult.scores;
     allHistory = allHistory.concat(djResult.history);
     allDDEvents = allDDEvents.concat(djResult.ddEvents);
+    allPlayOrder = allPlayOrder.concat(djResult.playOrder);
+    allControllers = allControllers.concat(djResult.controllers);
   }
 
   if (config.includeFJ) {
@@ -969,6 +1224,8 @@ export function simulateFromState(
     winner,
     history: trackHistory ? allHistory : undefined,
     ddEvents: trackHistory ? allDDEvents : undefined,
+    playOrder: trackHistory ? allPlayOrder : undefined,
+    controllers: trackHistory ? allControllers : undefined,
   };
 }
 
