@@ -109,6 +109,58 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
     return m;
   }, [seasonMap]);
 
+  // --- Accessibility: text alternatives for the canvas (additive, no draw changes) ---
+
+  // Headline stats over the full winRates array: favored/toss-up/underdog
+  // buckets match the thresholds used in YourNumber.tsx (>50% / 30-50% / <30%).
+  const winRateSummary = useMemo(() => {
+    if (!winRates || winRates.length === 0) return null;
+    let sum = 0;
+    let favored = 0;
+    let underdog = 0;
+    for (const wr of winRates) {
+      sum += wr;
+      if (wr > 0.5) favored++;
+      else if (wr < 0.3) underdog++;
+    }
+    const total = winRates.length;
+    return { total, overall: sum / total, favored, underdog, tossUp: total - favored - underdog };
+  }, [winRates]);
+
+  const ariaLabel = useMemo(() => {
+    if (progress !== null) {
+      return `Simulating win rates for ${games.length} games… ${Math.round(progress * 100)}% complete.`;
+    }
+    if (!winRateSummary) {
+      return `Contribution graph of ${games.length} games. Not yet simulated.`;
+    }
+    const { total, overall, favored, tossUp, underdog } = winRateSummary;
+    return `Contribution graph of ${total} games. Overall win rate ${Math.round(overall * 100)}%. `
+      + `${favored} favored games (win rate over 50%), ${tossUp} toss-up games (30% to 50%), `
+      + `${underdog} underdog games (win rate under 30%).`;
+  }, [progress, games.length, winRateSummary]);
+
+  // Per-season summary: mean win rate + game count, for the offscreen table.
+  const seasonSummaries = useMemo(() => {
+    return seasonOrder.map(season => {
+      const indices = seasonMap.get(season) || [];
+      let meanWinRate: number | null = null;
+      if (winRates) {
+        let sum = 0;
+        let n = 0;
+        for (const gi of indices) {
+          const wr = winRates[gi];
+          if (wr !== undefined) {
+            sum += wr;
+            n++;
+          }
+        }
+        if (n > 0) meanWinRate = sum / n;
+      }
+      return { season, count: indices.length, meanWinRate };
+    });
+  }, [seasonOrder, seasonMap, winRates]);
+
   // Zoomed calendar grid
   const zoomGrid = useMemo(() => {
     if (zoomedSeason === null) return null;
@@ -359,8 +411,49 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
       >
         <canvas
           ref={canvasRef}
+          role="img"
+          aria-label={ariaLabel}
           style={{ cursor: 'pointer', display: 'block' }}
         />
+      </div>
+      {/* Screen-reader / keyboard alternatives — additive only, never
+          affects the canvas drawing or mouse interaction above. */}
+      <div className="visually-hidden">
+        <table>
+          <caption>Win rate by season</caption>
+          <thead>
+            <tr>
+              <th scope="col">Season</th>
+              <th scope="col">Games</th>
+              <th scope="col">Mean win rate</th>
+            </tr>
+          </thead>
+          <tbody>
+            {seasonSummaries.map(({ season, count, meanWinRate }) => (
+              <tr key={season}>
+                <td>Season {season}</td>
+                <td>{count}</td>
+                <td>{meanWinRate !== null ? `${Math.round(meanWinRate * 100)}%` : 'Not yet simulated'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <nav aria-label="Jump to season">
+          <ul>
+            <li>
+              <button type="button" onClick={() => setZoomedSeason(null)}>
+                All seasons
+              </button>
+            </li>
+            {seasonOrder.map(season => (
+              <li key={season}>
+                <button type="button" onClick={() => setZoomedSeason(season)}>
+                  Season {season} ({seasonMap.get(season)?.length ?? 0} games)
+                </button>
+              </li>
+            ))}
+          </ul>
+        </nav>
       </div>
       {tooltip && (
         <div style={{
