@@ -16,3 +16,6 @@ data/
 # See README.md > References for where to get them.
 ferrucci2012.pdf
 tesauro2012.pdf
+
+# Agent worktrees
+.claude/worktrees/
