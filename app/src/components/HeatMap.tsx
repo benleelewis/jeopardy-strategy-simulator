@@ -411,8 +411,22 @@ export function HeatMap({
     }
 
     // YOU marker
+    // Set the initial transform here (not just in the separate "Update
+    // marker position" effect below, which only re-fires when `position`
+    // itself changes): this whole main-group is torn down and rebuilt
+    // whenever `grid` changes (e.g. the fast→refined-pass resolution bump),
+    // and without an initial transform the freshly-created group briefly
+    // sits untransformed at the chart's origin (top-left), overlapping the
+    // title above it.
+    // Read from posRef (not `position` directly) so this effect's
+    // dependency array doesn't need `position` — same ref pattern the drag
+    // handlers below already use, since adding it here would force a full
+    // grid/contour rebuild on every drag frame (the exact cost the separate
+    // "Update marker position" effect exists to avoid).
+    const initialPos = posRef.current;
     const youGroup = g.append('g')
       .attr('class', 'you-marker')
+      .attr('transform', `translate(${xScale(initialPos.x)},${yScale(initialPos.y)})`)
       .style('cursor', 'grab');
 
     youGroup.append('circle')
