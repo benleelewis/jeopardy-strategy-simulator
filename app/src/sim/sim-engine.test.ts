@@ -130,6 +130,68 @@ describe('sim-engine', () => {
       // Should have 3 DD events total (1 J + 2 DJ)
       expect(result.ddEvents!.length).toBe(3);
     });
+
+    // TODOS "P2 — GameDetail DD event rows": a seeded game's DD events carry
+    // the new optional fields GameDetail needs to recompute an
+    // equity-optimal wager outside the engine, and scoreAfter is internally
+    // consistent with scoreBefore ± wager.
+    it('a seeded game returns DD events with the new equity-recomputation fields populated', () => {
+      const you = makePlayer(0.7, 0.85, 0.6, 0.5);
+      const opp = makePlayer(0.6, 0.87, 0.5, 0.5);
+      const config: SimConfig = { ...DEFAULT_CONFIG, ddStrategy: 'aggressive' };
+      const rng = mulberry32(42);
+      const result = simulateGame(you, opp, opp, config, true, rng);
+
+      expect(result.ddEvents!.length).toBe(3);
+      for (const ev of result.ddEvents!) {
+        expect(ev.clueValue).toBeGreaterThan(0);
+        expect(ev.scoresBefore).toBeDefined();
+        expect(ev.scoresBefore).toHaveLength(3);
+        expect(ev.scoresBefore![ev.player]).toBe(ev.scoreBefore);
+        expect(ev.cluesRemainingAfter).toBeGreaterThanOrEqual(0);
+        expect(ev.adjustedP).toBeGreaterThan(0);
+        expect(ev.adjustedP).toBeLessThanOrEqual(1);
+
+        // scoreAfter is exactly scoreBefore ± wager, per correct/wrong.
+        const expectedAfter = ev.correct ? ev.scoreBefore + ev.wager : ev.scoreBefore - ev.wager;
+        expect(ev.scoreAfter).toBe(expectedAfter);
+      }
+
+      // Determinism: same seed, same events (a re-run for GameDetail must be
+      // reproducible so repeated clicks on the same game show the same DDs).
+      const rng2 = mulberry32(42);
+      const result2 = simulateGame(you, opp, opp, config, true, rng2);
+      expect(result2.ddEvents).toEqual(result.ddEvents);
+    });
+
+    it('the recorded score-state reproduces the same equity-optimal wager equityWager would compute live', () => {
+      const you = makePlayer(0.7, 0.85, 0.6, 0.5);
+      const opp = makePlayer(0.6, 0.87, 0.5, 0.5);
+      const rng = mulberry32(0xf00d);
+      const table = buildValueTable(OPPONENT_PROFILES.average, DEFAULT_CONFIG, rng, {
+        rolloutsPerCell: 5,
+      });
+
+      const config: SimConfig = { ...DEFAULT_CONFIG, ddStrategy: 'equity', valueTable: table };
+      const gameRng = mulberry32(7);
+      const result = simulateGame(you, opp, opp, config, true, gameRng);
+
+      const yourEvents = result.ddEvents!.filter(e => e.player === 0);
+      expect(yourEvents.length).toBeGreaterThan(0);
+
+      for (const ev of yourEvents) {
+        const recomputed = equityWager(
+          { knowledge: you.b * you.p, buzzerSpeed: you.buzzerSpeed },
+          ev.scoresBefore!,
+          ev.cluesRemainingAfter!,
+          ev.adjustedP!,
+          table,
+        );
+        // The engine wagered exactly this (it dispatches to the same
+        // equityWager with the same inputs before mutating scores).
+        expect(ev.wager).toBe(recomputed);
+      }
+    });
   });
 
   describe('DD strategy effects', () => {

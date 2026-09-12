@@ -1,11 +1,25 @@
 import { useRef, useEffect } from 'react';
 import type { GameData } from './ContributionGraph';
 import { calibrateOpponent } from '../sim/calibrate';
+import type { DDEvent } from '../sim/sim-engine';
+import { equityWager, type ValueTable, type EquityWagerYou } from '../sim/value-function';
 
 export interface SimRun {
   scores: [number, number, number];
   winner: number;
   history?: [number, number, number][];
+}
+
+/**
+ * TODOS "P2 — GameDetail DD event rows": one seeded simulateGame's DD events
+ * plus the "you" skill the worker used to produce them — everything the
+ * Daily Doubles section needs to recompute an equity-optimal wager per
+ * "you" row via the app's existing value function (`equityWager`).
+ */
+export interface DDGameDetail {
+  gameIndex: number;
+  ddEvents: DDEvent[];
+  you: EquityWagerYou;
 }
 
 interface Props {
@@ -14,6 +28,14 @@ interface Props {
   winRate: number | undefined;
   onClose: () => void;
   simResults: SimRun[] | null;
+  /** One seeded game's DD events (TODOS item), keyed to `index` by the
+   *  caller — null while the worker's simulateGameDetail sim is in flight. */
+  ddDetail?: DDGameDetail | null;
+  /** App's cached V-table (E-2), when Optimal (equity) has been built on the
+   *  Explorer tab — reused here exactly like GameAnalyzer's equity mini-chart
+   *  (see App.tsx's `cachedValueTable`). Undefined ⇒ the equity-optimal
+   *  column shows a build-it-first hint instead of blocking. */
+  valueTable?: ValueTable;
 }
 
 const sectionStyle: React.CSSProperties = {
@@ -92,13 +114,18 @@ function ScoreChart({ history, winner }: { history: [number, number, number][]; 
   return <canvas ref={canvasRef} style={{ display: 'block' }} />;
 }
 
-export function GameDetail({ game, index, winRate, onClose, simResults }: Props) {
+export function GameDetail({ game, index, winRate, onClose, simResults, ddDetail, valueTable }: Props) {
   const pct = (v: number) => `${Math.round(v * 100)}%`;
   const dollars = (v: number) => `$${Math.max(0, v).toLocaleString()}`;
 
   const calibrated = game.o.map(opp => calibrateOpponent(opp));
   const wins = simResults?.filter(r => r.winner === 0).length ?? 0;
   const total = simResults?.length ?? 0;
+
+  // Only trust ddDetail when it's for THIS game — App.tsx fires the sim
+  // async on click; a fast re-click before the previous result lands must
+  // not show the wrong game's DD events.
+  const ddForThisGame = ddDetail && ddDetail.gameIndex === index ? ddDetail : null;
 
   return (
     <div style={{
@@ -178,7 +205,7 @@ export function GameDetail({ game, index, winRate, onClose, simResults }: Props)
       </div>
 
       {/* Simulation Results */}
-      <div style={{ ...sectionStyle, borderBottom: 'none' }}>
+      <div style={sectionStyle}>
         <div style={{
           display: 'flex',
           justifyContent: 'space-between',
@@ -262,6 +289,134 @@ export function GameDetail({ game, index, winRate, onClose, simResults }: Props)
           </div>
         )}
       </div>
+
+      {/* Daily Doubles — TODOS "P2 — GameDetail DD event rows" */}
+      <div style={{ ...sectionStyle, borderBottom: 'none' }}>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>
+          Daily Doubles
+        </div>
+        <DailyDoubles game={game} ddDetail={ddForThisGame} valueTable={valueTable} dollars={dollars} />
+      </div>
     </div>
   );
 }
+
+/**
+ * One row per DD event from a single seeded simulation of this game
+ * (TODOS "P2 — GameDetail DD event rows"). "You" rows get an extra
+ * Equity-optimal wager column, computed via the app's existing value
+ * function (`equityWager`) at that DD's recorded score-state.
+ */
+function DailyDoubles({
+  game, ddDetail, valueTable, dollars,
+}: {
+  game: GameData;
+  ddDetail: DDGameDetail | null;
+  valueTable: ValueTable | undefined;
+  dollars: (v: number) => string;
+}) {
+  if (!ddDetail) {
+    return (
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: 8 }}>
+        Simulating...
+      </div>
+    );
+  }
+
+  if (ddDetail.ddEvents.length === 0) {
+    return (
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', padding: 8 }}>
+        No Daily Doubles recorded for this simulation.
+      </div>
+    );
+  }
+
+  const whoLabel = (player: number) => player === 0 ? 'You' : game.o[player - 1].n.split(' ')[0];
+
+  return (
+    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, fontFamily: 'monospace' }}>
+      <thead>
+        <tr style={{ borderBottom: '1px solid var(--border)', color: 'var(--text-muted)', fontSize: 10, textTransform: 'uppercase' }}>
+          <th style={thStyle}>Rd</th>
+          <th style={thStyle}>Value</th>
+          <th style={thStyle}>Who</th>
+          <th style={thStyle}>Before</th>
+          <th style={thStyle}>Wager</th>
+          <th style={thStyle}>Result</th>
+          <th style={thStyle}>After</th>
+          <th style={thStyle}>Equity-optimal wager</th>
+        </tr>
+      </thead>
+      <tbody>
+        {ddDetail.ddEvents.map((ev, i) => {
+          const isYou = ev.player === 0;
+          const last = i === ddDetail.ddEvents.length - 1;
+          const rowBorder = last ? 'none' : '1px solid var(--border)';
+
+          let equityCell: React.ReactNode = '—';
+          let diffCopy: string | null = null;
+
+          if (isYou) {
+            if (!valueTable) {
+              equityCell = (
+                <span style={{ color: 'var(--text-muted)', fontFamily: 'inherit', fontWeight: 400 }}>
+                  Build the Optimal (equity) strategy in the Explorer to see this
+                </span>
+              );
+            } else if (ev.scoresBefore !== undefined && ev.cluesRemainingAfter !== undefined && ev.adjustedP !== undefined) {
+              const optimalWager = equityWager(
+                ddDetail.you, ev.scoresBefore, ev.cluesRemainingAfter, ev.adjustedP, valueTable,
+              );
+              equityCell = dollars(optimalWager);
+              const diff = ev.wager - optimalWager;
+              if (Math.abs(diff) > 500) {
+                diffCopy = `You wagered ${dollars(Math.abs(diff))} ${diff > 0 ? 'more' : 'less'} than the equity-optimal ${dollars(optimalWager)}.`;
+              }
+            }
+          }
+
+          return (
+            <tr key={i} style={{
+              borderBottom: rowBorder,
+              color: isYou ? 'var(--text-h)' : 'var(--text-muted)',
+              fontWeight: isYou ? 600 : 400,
+            }}>
+              <td style={tdStyle}>{ev.round}</td>
+              <td style={tdStyle}>{ev.clueValue !== undefined ? dollars(ev.clueValue) : '—'}</td>
+              <td style={tdStyle}>{whoLabel(ev.player)}</td>
+              <td style={tdStyle}>{dollars(ev.scoreBefore)}</td>
+              <td style={tdStyle}>{dollars(ev.wager)}</td>
+              <td style={{
+                ...tdStyle,
+                color: ev.correct ? 'var(--cg-5, #f5d442)' : 'var(--cg-3, #1a3ba8)',
+                fontWeight: 600,
+              }}>
+                {ev.correct ? 'Correct' : 'Wrong'}
+              </td>
+              <td style={tdStyle}>{dollars(ev.scoreAfter)}</td>
+              <td style={{ ...tdStyle, fontFamily: 'sans-serif', fontSize: 11 }}>
+                {equityCell}
+                {diffCopy && (
+                  <div style={{ marginTop: 2, color: 'var(--text-h)', fontWeight: 500 }}>
+                    {diffCopy}
+                  </div>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+const thStyle: React.CSSProperties = {
+  textAlign: 'left',
+  padding: '2px 6px 4px 0',
+};
+
+const tdStyle: React.CSSProperties = {
+  textAlign: 'left',
+  padding: '3px 6px 3px 0',
+  verticalAlign: 'top',
+};
