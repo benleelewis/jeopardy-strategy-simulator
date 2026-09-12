@@ -1,5 +1,7 @@
 # Jeopardy strategy simulator
 
+[![CI](https://github.com/benleelewis/jeopardy-strategy-simulator/actions/workflows/ci.yml/badge.svg)](https://github.com/benleelewis/jeopardy-strategy-simulator/actions/workflows/ci.yml)
+
 This project answers one question. If you went on Jeopardy with a given level of
 knowledge and a given buzzer speed, how often would you win?
 
