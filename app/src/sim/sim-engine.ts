@@ -178,6 +178,19 @@ export interface SimConfig {
    * opponents (Tesauro: "strong players generally exhibit more DD seeking").
    */
   opponentSquareSelection?: SquareSelection;
+  /**
+   * Gates whether Daily Double accuracy is scaled by the existing
+   * difficulty-by-row multiplier (`effectiveDifficultyMultiplier`), the same
+   * way regular clues are. Default (`undefined`/`true`) preserves the
+   * existing behavior exactly — a bottom-row DD is answered at reduced
+   * accuracy, same as any other clue at that row/value. Tesauro 2012 instead
+   * models DD accuracy as a single flat parameter, independent of the clue's
+   * row; `false` matches that by using the player's base precision
+   * (`player.p`) unscaled for the DD's `adjustedP`. Regular (non-DD) clues
+   * are unaffected either way — this only gates the DD branch of
+   * `simulateRound`.
+   */
+  ddDifficultyScaling?: boolean;
 }
 
 /**
@@ -927,7 +940,10 @@ export function simulateRound(
       const controllerStrategy = ddController === 0
         ? config.ddStrategy
         : (config.opponentDdStrategy ?? config.ddStrategy);
-      const adjustedP = player.p * dm;
+      // ddDifficultyScaling gates DD-only: false uses the player's flat base
+      // precision (Tesauro 2012's model), default/true keeps the existing
+      // difficulty-by-row scaling (`dm`) — see SimConfig.ddDifficultyScaling.
+      const adjustedP = config.ddDifficultyScaling === false ? player.p : player.p * dm;
 
       // E-3: equity dispatch happens HERE, before ddWager — 'equity' never
       // reaches ddWager's switch (its parameter type statically excludes

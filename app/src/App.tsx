@@ -63,6 +63,8 @@ interface ValueTableCacheInputs {
    *  `simulateFromState`, so a square-selection change invalidates it. */
   squareSelection: string;
   opponentSquareSelection: string;
+  /** Task 3: changes DD wager math inside the same rollouts. */
+  ddDifficultyScaling: boolean;
 }
 
 function valueTableCacheKey(inputs: ValueTableCacheInputs): string {
@@ -87,6 +89,9 @@ interface AppState {
   opponentSeekDD: boolean;
   /** P2 "DD impact difference map overlay" (TODOS.md). Off by default. */
   showDDImpact: boolean;
+  /** Task 3: gates whether DD accuracy is scaled by the difficulty-by-row
+   *  multiplier. Default true (today's behavior). */
+  ddDifficultyScaling: boolean;
 }
 
 function encodeState(s: AppState): string {
@@ -102,6 +107,7 @@ function encodeState(s: AppState): string {
     `sk=${s.seekDD ? 1 : 0}`, // DD seeking (TODOS.md P2) — you
     `osk=${s.opponentSeekDD ? 1 : 0}`, // DD seeking — opponents
     `di=${s.showDDImpact ? 1 : 0}`, // DD impact overlay toggle
+    `dds=${s.ddDifficultyScaling ? 1 : 0}`, // Task 3: scale DD accuracy by row
   ];
   // Only encode non-default pinned values
   for (const [name, val] of Object.entries(s.pinned)) {
@@ -157,6 +163,9 @@ function decodeState(hash: string): Partial<AppState> | null {
   const di = params.get('di');
   if (di !== null) result.showDDImpact = di !== '0';
 
+  const dds = params.get('dds');
+  if (dds !== null) result.ddDifficultyScaling = dds !== '0';
+
   // Pinned values
   const pinned: Record<string, number> = {};
   for (const [key, val] of params.entries()) {
@@ -206,6 +215,9 @@ export default function App() {
   // Daily Double seeking. Both off (today's top-down order) by default.
   const [seekDD, setSeekDD] = useState(initial?.seekDD ?? false);
   const [opponentSeekDD, setOpponentSeekDD] = useState(initial?.opponentSeekDD ?? false);
+  // Task 3: gates whether DD accuracy is scaled by the difficulty-by-row
+  // multiplier. Default true — today's behavior, byte-identical.
+  const [ddDifficultyScaling, setDdDifficultyScaling] = useState(initial?.ddDifficultyScaling ?? true);
   // Landing tab is All Games: it is the one view that reads on its own, with
   // no numbers to type in first. Your Game and Explorer are opt-in from there.
   const [tab, setTab] = useState<AppState['tab']>(initial?.tab ?? 'games');
@@ -270,7 +282,8 @@ export default function App() {
     includeFJ,
     squareSelection: seekDD ? 'ddSeek' : 'default',
     opponentSquareSelection: opponentSeekDD ? 'ddSeek' : 'default',
-  }), [pinnedValues.opponentStrength, pinnedValues.ddAggression, includeFJ, seekDD, opponentSeekDD]);
+    ddDifficultyScaling,
+  }), [pinnedValues.opponentStrength, pinnedValues.ddAggression, includeFJ, seekDD, opponentSeekDD, ddDifficultyScaling]);
 
   const cachedValueTable = valueTableCache[currentCacheKey];
 
@@ -284,6 +297,8 @@ export default function App() {
     // Your Game estimate's V-table (all consume this one `config` object).
     cfg.squareSelection = seekDD ? 'ddSeek' : 'default';
     cfg.opponentSquareSelection = opponentSeekDD ? 'ddSeek' : 'default';
+    // Task 3: gates DD accuracy's difficulty-by-row scaling.
+    cfg.ddDifficultyScaling = ddDifficultyScaling;
 
     if (ddStrategy === 'equity') {
       // Equity dispatch (sim-engine.ts) needs a valueTable; until one is
@@ -308,7 +323,7 @@ export default function App() {
       cfg.ddStrategy = ddStrategy;
     }
     return cfg;
-  }, [includeFJ, xAxis, yAxis, pinnedValues, ddStrategy, cachedValueTable, clueStats, seekDD, opponentSeekDD]);
+  }, [includeFJ, xAxis, yAxis, pinnedValues, ddStrategy, cachedValueTable, clueStats, seekDD, opponentSeekDD, ddDifficultyScaling]);
 
   // --- URL hash sync (write) ---
   useEffect(() => {
@@ -325,11 +340,12 @@ export default function App() {
       seekDD,
       opponentSeekDD,
       showDDImpact,
+      ddDifficultyScaling,
     };
     const hash = encodeState(state);
     // Use replaceState to avoid polluting browser history on every drag
     window.history.replaceState(null, '', `#${hash}`);
-  }, [position, xAxis, yAxis, pinnedValues, includeFJ, theme, tab, refinedSpeed, seekDD, opponentSeekDD, showDDImpact]);
+  }, [position, xAxis, yAxis, pinnedValues, includeFJ, theme, tab, refinedSpeed, seekDD, opponentSeekDD, showDDImpact, ddDifficultyScaling]);
 
   // --- Load games.json on mount ---
   useEffect(() => {
@@ -492,6 +508,8 @@ export default function App() {
         // and All Games sweep.
         squareSelection: seekDD ? 'ddSeek' : 'default',
         opponentSquareSelection: opponentSeekDD ? 'ddSeek' : 'default',
+        // Task 3: DD wager math inside these same rollouts.
+        ddDifficultyScaling,
       },
       seed: 0xf00d,
       cacheKey: currentCacheKey,
@@ -836,6 +854,8 @@ export default function App() {
                   onSeekDDChange={setSeekDD}
                   opponentSeekDD={opponentSeekDD}
                   onOpponentSeekDDChange={setOpponentSeekDD}
+                  ddDifficultyScaling={ddDifficultyScaling}
+                  onDdDifficultyScalingChange={setDdDifficultyScaling}
                 />
               </details>
             </div>
