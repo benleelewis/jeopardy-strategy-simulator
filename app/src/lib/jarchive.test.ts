@@ -4,18 +4,21 @@
  * gitignored; copy it from the main checkout's data/jarchive-cache/ before
  * running these locally, same as `scripts/dd-advisor.ts` needs it cached).
  *
+ * Loaded via Vite's `?raw` import (declared by `vite/client`, already in
+ * tsconfig.app.json's `types`) rather than `fs.readFileSync`: this file
+ * lives under `src/`, whose tsconfig deliberately has no Node type
+ * declarations (it's typechecked as browser code), so a plain `fs` import
+ * would fail `tsc -b` even though it'd run fine under Vitest.
+ *
  * These numbers were captured by actually running the parser against that
  * fixture (`npx tsx scripts/dd-advisor.ts --game 9501 --list`), not guessed.
  */
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
 import { describe, it, expect } from 'vitest';
 import { parseGame, replay, playerStats } from './jarchive';
-
-const FIXTURE_PATH = resolve(__dirname, '../../../data/jarchive-cache/game-9501.html');
+import fixtureHtml from '../../../data/jarchive-cache/game-9501.html?raw';
 
 function loadFixture(): string {
-  return readFileSync(FIXTURE_PATH, 'utf8');
+  return fixtureHtml;
 }
 
 describe('parseGame + replay (game 9501 fixture)', () => {

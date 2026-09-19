@@ -335,7 +335,7 @@ export function replay(game: ParsedGame): Replay {
   const idxOf = (nickname: string) => game.players.indexOf(nickname);
   const steps: ReplayStep[] = [];
   const endOfRound = {} as Record<Round, number[]>;
-  let scores = new Array(n).fill(0);
+  const scores = new Array(n).fill(0);
 
   for (const round of ['J', 'DJ'] as Round[]) {
     const roundClues = game.clues.filter(c => c.round === round);
