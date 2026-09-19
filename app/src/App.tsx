@@ -85,6 +85,8 @@ interface AppState {
    *  and opponents' square-selection strategy. Both default off. */
   seekDD: boolean;
   opponentSeekDD: boolean;
+  /** P2 "DD impact difference map overlay" (TODOS.md). Off by default. */
+  showDDImpact: boolean;
 }
 
 function encodeState(s: AppState): string {
@@ -99,6 +101,7 @@ function encodeState(s: AppState): string {
     `sp=${s.refinedSpeed[0]}`, // 'f' | 'n' | 'p' — Speed vs Accuracy (P-1C)
     `sk=${s.seekDD ? 1 : 0}`, // DD seeking (TODOS.md P2) — you
     `osk=${s.opponentSeekDD ? 1 : 0}`, // DD seeking — opponents
+    `di=${s.showDDImpact ? 1 : 0}`, // DD impact overlay toggle
   ];
   // Only encode non-default pinned values
   for (const [name, val] of Object.entries(s.pinned)) {
@@ -151,6 +154,9 @@ function decodeState(hash: string): Partial<AppState> | null {
   const osk = params.get('osk');
   if (osk !== null) result.opponentSeekDD = osk !== '0';
 
+  const di = params.get('di');
+  if (di !== null) result.showDDImpact = di !== '0';
+
   // Pinned values
   const pinned: Record<string, number> = {};
   for (const [key, val] of params.entries()) {
@@ -193,10 +199,8 @@ export default function App() {
   // pass. Default 'normal' (450) reproduces the pre-existing hardcoded
   // behavior/timing exactly.
   const [refinedSpeed, setRefinedSpeed] = useState<RefinedSpeed>(initial?.refinedSpeed ?? 'normal');
-  // P2 "DD impact difference map overlay" (TODOS.md). Off by default, not
-  // persisted in the URL hash (a per-session viewing toggle, not a
-  // strategy/knob choice).
-  const [showDDImpact, setShowDDImpact] = useState(false);
+  // P2 "DD impact difference map overlay" (TODOS.md). Off by default.
+  const [showDDImpact, setShowDDImpact] = useState(initial?.showDDImpact ?? false);
   // P2 "DD seeking / square-selection strategy" (TODOS.md). Your (player 0)
   // and opponents' square-selection strategy — Tesauro 2012's p_DD + 0.1·p_RC
   // Daily Double seeking. Both off (today's top-down order) by default.
@@ -320,11 +324,12 @@ export default function App() {
       refinedSpeed,
       seekDD,
       opponentSeekDD,
+      showDDImpact,
     };
     const hash = encodeState(state);
     // Use replaceState to avoid polluting browser history on every drag
     window.history.replaceState(null, '', `#${hash}`);
-  }, [position, xAxis, yAxis, pinnedValues, includeFJ, theme, tab, refinedSpeed, seekDD, opponentSeekDD]);
+  }, [position, xAxis, yAxis, pinnedValues, includeFJ, theme, tab, refinedSpeed, seekDD, opponentSeekDD, showDDImpact]);
 
   // --- Load games.json on mount ---
   useEffect(() => {
