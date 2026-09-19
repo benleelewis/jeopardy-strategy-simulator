@@ -99,6 +99,23 @@ npx tsx scripts/build-games.ts
 npx tsx scripts/build-clue-stats.ts
 ```
 
+### Local dev: J-Archive import
+
+"Your game" can load a real game from J-Archive by ID (`app/api/jarchive.ts`),
+but that route is a Vercel serverless function — `npm run dev` (plain Vite)
+doesn't serve `/api` on its own. `app/vite.config.ts` proxies `/api` to
+`http://localhost:3000`, so run the Vercel dev server alongside Vite:
+
+```
+npx vercel dev --listen 3000
+npm run dev
+```
+
+Without `vercel dev` running, the Load button detects that it got Vite's HTML
+shell back instead of JSON and shows a message pointing at the deployed site,
+rather than failing silently — the import feature itself works fine on the
+deployed app without any of this.
+
 ## Repository layout
 
 - `app/src/sim/` holds the simulation engine. It has no dependencies and every

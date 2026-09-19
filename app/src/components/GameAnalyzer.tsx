@@ -19,6 +19,7 @@ import {
 } from '../sim/value-function';
 import { DEFAULT_CONFIG, mulberry32 } from '../sim/sim-engine';
 import { OPPONENT_PROFILES } from '../sim/opponent-models';
+import type { JArchiveGameResponse, JArchiveDDEvent } from '../lib/jarchive';
 
 export interface GameEstimate {
   knowledge: number;   // b × p composite
@@ -82,6 +83,13 @@ const MINI_TABLE_SEED = 0xA11CE;
  *  clue-by-clue state). */
 const ASSUMED_CLUES_REMAINING = 15;
 
+/** Rotate a 3-player score/name tuple so `seat` sits at index 0 — the
+ *  layout `equityWager`/`queryV` expect ("your" score first). */
+function rotateToSeat<T>(arr: readonly T[], seat: number): [T, T, T] {
+  const rest = arr.filter((_, i) => i !== seat);
+  return [arr[seat], rest[0], rest[1]];
+}
+
 export function GameAnalyzer({ onEstimate, sharedValueTable }: Props) {
   const [correct, setCorrect] = useState(18);
   const [wrong, setWrong] = useState(3);
@@ -94,8 +102,70 @@ export function GameAnalyzer({ onEstimate, sharedValueTable }: Props) {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
+  // J-Archive import.
+  const [jarchiveGameId, setJarchiveGameId] = useState('');
+  const [jarchiveStatus, setJarchiveStatus] = useState<'idle' | 'loading'>('idle');
+  const [jarchiveError, setJarchiveError] = useState<string | null>(null);
+  const [jarchiveGame, setJarchiveGame] = useState<JArchiveGameResponse | null>(null);
+  const [jarchiveContestant, setJarchiveContestant] = useState<string | null>(null);
+
   const ddWagerParsed = parseWagerInput(ddWagerRaw);
   const fjWagerParsed = parseWagerInput(fjWagerRaw);
+
+  const handleLoadJArchive = useCallback(async () => {
+    const trimmed = jarchiveGameId.trim();
+    if (trimmed === '') {
+      setJarchiveError('Enter a J-Archive game ID first, e.g. 9501');
+      return;
+    }
+    setJarchiveStatus('loading');
+    setJarchiveError(null);
+    setJarchiveGame(null);
+    setJarchiveContestant(null);
+
+    try {
+      const res = await fetch(`/api/jarchive?game=${encodeURIComponent(trimmed)}`);
+      const raw = await res.text();
+
+      // `npm run dev` doesn't serve /api by itself (see README's "Local
+      // dev: J-Archive import" section) — without `vercel dev` behind the
+      // Vite proxy, this request comes back as Vite's HTML shell instead
+      // of our route's JSON/plain-text response. Detect that by content,
+      // not status, since the shell itself is a 200.
+      if (raw.trimStart().startsWith('<')) {
+        setJarchiveStatus('idle');
+        setJarchiveError("J-Archive import isn't available in this dev server. Try the deployed site, or run `vercel dev` alongside `npm run dev` (see README).");
+        return;
+      }
+
+      if (!res.ok) {
+        setJarchiveStatus('idle');
+        setJarchiveError(raw || `Couldn't load game ${trimmed} (HTTP ${res.status}).`);
+        return;
+      }
+
+      const data = JSON.parse(raw) as JArchiveGameResponse;
+      setJarchiveGame(data);
+      setJarchiveStatus('idle');
+    } catch {
+      setJarchiveStatus('idle');
+      setJarchiveError('Network error loading from J-Archive. Check your connection and try again.');
+    }
+  }, [jarchiveGameId]);
+
+  const handlePickContestant = useCallback((name: string) => {
+    const c = jarchiveGame?.contestants.find(x => x.name === name);
+    if (!c) return;
+    setJarchiveContestant(name);
+    setCorrect(c.correct);
+    setWrong(c.wrong);
+    setCoryat(c.coryat);
+  }, [jarchiveGame]);
+
+  const yourDailyDoubles: JArchiveDDEvent[] = useMemo(() => {
+    if (!jarchiveGame || !jarchiveContestant) return [];
+    return jarchiveGame.dailyDoubles.filter(dd => dd.who === jarchiveContestant);
+  }, [jarchiveGame, jarchiveContestant]);
 
   const handleSubmit = useCallback(() => {
     // Knowledge = accuracy when buzzing (epsilon smoothing)
@@ -178,6 +248,25 @@ export function GameAnalyzer({ onEstimate, sharedValueTable }: Props) {
     return { points, optimalWager, optimalEquity, yourWager, yourEquity };
   }, [equityTable, ddWagerParsed.value, coryat, estKnowledge, estBuzzer, confidence]);
 
+  // "You bet $X. Equity-optimal was $Y." for each real Daily Double the
+  // selected J-Archive contestant hit. Uses the same table/confidence as
+  // the mini chart above (equityTable — shared Optimal-mode table when
+  // built on the Explorer, else the lazy fallback), since a real DD's
+  // pre-buzz confidence isn't recoverable from J-Archive.
+  const ddOptimalWagers = useMemo(() => {
+    if (!jarchiveGame || !jarchiveContestant || yourDailyDoubles.length === 0) return null;
+    if (!equityTable) return null;
+    const seat = jarchiveGame.players.indexOf(jarchiveContestant);
+    if (seat < 0) return null;
+
+    const you: EquityWagerYou = { knowledge: estKnowledge, buzzerSpeed: estBuzzer };
+    return yourDailyDoubles.map(dd => {
+      const scores = rotateToSeat(dd.allScoresBefore, seat);
+      const optimalWager = equityWager(you, scores, dd.cluesRemainingAfter, confidence, equityTable);
+      return { dd, optimalWager };
+    });
+  }, [jarchiveGame, jarchiveContestant, yourDailyDoubles, equityTable, estKnowledge, estBuzzer, confidence]);
+
   return (
     <div style={{
       background: 'var(--bg-panel)',
@@ -199,6 +288,86 @@ export function GameAnalyzer({ onEstimate, sharedValueTable }: Props) {
       </div>
 
       <div style={{ padding: '16px 20px' }}>
+        {/* J-Archive import */}
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelStyle}>Load from J-Archive</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={jarchiveGameId}
+              onChange={e => setJarchiveGameId(e.target.value)}
+              placeholder="Game ID, e.g. 9501"
+              style={{ ...inputStyle, flex: 1 }}
+              aria-label="J-Archive game ID"
+            />
+            <button
+              onClick={handleLoadJArchive}
+              disabled={jarchiveStatus === 'loading'}
+              style={{
+                padding: '6px 14px',
+                border: '1px solid var(--accent)',
+                borderRadius: 4,
+                background: 'var(--accent)',
+                color: '#fff',
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: jarchiveStatus === 'loading' ? 'default' : 'pointer',
+                opacity: jarchiveStatus === 'loading' ? 0.7 : 1,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {jarchiveStatus === 'loading' ? 'Loading…' : 'Load'}
+            </button>
+          </div>
+          {jarchiveError && (
+            <div style={hintStyle}>{jarchiveError}</div>
+          )}
+
+          {jarchiveGame && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
+                {jarchiveGame.title || `Game ${jarchiveGame.gameId}`} — which contestant are you?
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {jarchiveGame.contestants.map(c => (
+                  <ToggleButton
+                    key={c.name}
+                    label={c.name}
+                    active={jarchiveContestant === c.name}
+                    onClick={() => handlePickContestant(c.name)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {jarchiveGame && jarchiveContestant && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-h)', marginBottom: 4 }}>
+                {jarchiveContestant}'s Daily Doubles
+              </div>
+              {yourDailyDoubles.length === 0 ? (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  {jarchiveContestant} didn't hit a Daily Double in this game.
+                </div>
+              ) : !equityTable ? (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  Build the Optimal (equity) strategy in the Explorer to see this.
+                </div>
+              ) : (
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: 'var(--text-h)' }}>
+                  {ddOptimalWagers?.map(({ dd, optimalWager }, i) => (
+                    <li key={i} style={{ marginBottom: 4 }}>
+                      {dd.round} round: you bet ${dd.wager.toLocaleString()}. Equity-optimal was ${optimalWager.toLocaleString()}.
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* Core stats */}
         <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
           <NumberInput
@@ -541,6 +710,7 @@ function NumberInput({ label, value, onChange, min, max, step = 1 }: {
         max={max}
         step={step}
         style={inputStyle}
+        aria-label={label}
       />
     </div>
   );
