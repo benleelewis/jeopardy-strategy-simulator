@@ -350,3 +350,89 @@
     max-height: none;
   }
 }
+
+/* Phase 1D: "Watch this game" replay (GameReplay.tsx) */
+.replay-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.replay-bar-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 70px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.replay-bar-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.replay-bar-track {
+  background: var(--bg, rgba(127, 127, 127, 0.15));
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  height: 14px;
+  overflow: hidden;
+}
+
+.replay-bar-fill {
+  height: 100%;
+  width: 2%;
+  transition: width 160ms linear, box-shadow 160ms linear;
+}
+
+.replay-bar-flash {
+  box-shadow: inset 0 0 0 2px var(--text-h);
+}
+
+.replay-bar-score {
+  font-family: var(--mono);
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.replay-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.replay-controls button {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-h);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.replay-speed {
+  display: flex;
+  gap: 2px;
+}
+
+.replay-speed button {
+  padding: 4px 6px;
+}
+
+.replay-speed-active {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
+
+/* Respect reduced-motion: bar width/flash changes apply instantly instead
+   of sliding — same "near-zero duration" approach as .you-pulse above. */
+@media (prefers-reduced-motion: reduce) {
+  .replay-bar-fill {
+    transition: none;
+  }
+}
