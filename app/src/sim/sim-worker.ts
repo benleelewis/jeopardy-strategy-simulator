@@ -23,6 +23,11 @@
  *   OUT: { type: 'buildValueTableResult', table, cacheKey }  (table.data is a
  *        transferred Float32Array — see the persistent-worker postMessage call)
  *   OUT: { type: 'buildValueTableError', message, cacheKey }
+ *
+ *   IN:  { type: 'simSingleGameDetail', gameIndex, xAxis, yAxis, xVal, yVal, pinnedValues, config, numSims }
+ *   OUT: { type: 'simSingleGameDetailResult', gameIndex, results: { scores, winner, history, ddEvents }[] }
+ *        (history/ddEvents feed GameDetail's per-run chart and, additively,
+ *        GameReplay's "Watch this game" animation — Phase 1D)
  */
 
 import {
@@ -33,6 +38,7 @@ import {
   mulberry32,
   type SimConfig,
   type DDStrategy,
+  type DDEvent,
   DEFAULT_CONFIG,
 } from './sim-engine';
 import { buildValueTable } from './value-function';
@@ -277,13 +283,16 @@ self.onmessage = (e: MessageEvent) => {
     const mergedConfig: SimConfig = resolveDDStrategy(config, cellConfig, xAxis, yAxis);
 
     const game = games[gameIndex];
-    const results: { scores: [number, number, number]; winner: number; history?: [number, number, number][] }[] = [];
+    // ddEvents is carried through additively (Phase 1D replay needs Daily
+    // Double wager/correctness per clue) — existing consumers that only read
+    // scores/winner/history are unaffected.
+    const results: { scores: [number, number, number]; winner: number; history?: [number, number, number][]; ddEvents?: DDEvent[] }[] = [];
 
     for (let s = 0; s < numSims; s++) {
       const opp1 = sampleOpponent(calibrateOpponent(game.o[0]));
       const opp2 = sampleOpponent(calibrateOpponent(game.o[1]));
       const result = simulateGame(player, opp1, opp2, mergedConfig, true);
-      results.push({ scores: result.scores, winner: result.winner, history: result.history });
+      results.push({ scores: result.scores, winner: result.winner, history: result.history, ddEvents: result.ddEvents });
     }
 
     self.postMessage({ type: 'simSingleGameDetailResult', gameIndex, results });
