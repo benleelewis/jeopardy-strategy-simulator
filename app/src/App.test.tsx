@@ -118,18 +118,33 @@ describe('App — All Games colour mode (P2 optimal-vs-actual delta coloring)', 
     window.location.hash = '';
   });
 
-  // Pre-existing (main, unrelated to this feature): the win-rate sweep
-  // effect's dependency list has no `games`, so on a cold load straight
-  // onto the All Games tab it does not fire until a dependency changes —
-  // a tab round-trip is how a user kicks it off today.
+  // The sweep starts on its own once games.json is in the worker (the
+  // effect depends on `games`); no tab round-trip is needed.
   const kickOffWinRateSweep = async () => {
-    await waitFor(() => expect(persistentWorker()).toBeDefined(), { timeout: 3000 });
-    fireEvent.click(screen.getByRole('button', { name: /^Explorer$/ }));
-    fireEvent.click(screen.getByRole('button', { name: /^All Games/ }));
     await waitFor(() => {
       expect(persistentWorker()?.posted.some(m => m.type === 'simAllGames')).toBe(true);
     }, { timeout: 3000 });
   };
+
+  it('cold load onto All Games starts the win-rate sweep without any interaction', async () => {
+    render(<App />);
+    await screen.findByText('Jeopardy Strategy Simulator');
+    await waitFor(() => {
+      expect(persistentWorker()?.posted.some(m => m.type === 'simAllGames')).toBe(true);
+    }, { timeout: 3000 });
+  });
+
+  it('toggling Seek Daily Doubles on All Games re-runs the sweep with squareSelection set', async () => {
+    render(<App />);
+    await kickOffWinRateSweep();
+    const before = persistentWorker()!.posted.filter(m => m.type === 'simAllGames').length;
+    fireEvent.click(screen.getByRole('checkbox', { name: /Seek Daily Doubles/ }));
+    await waitFor(() => {
+      const runs = persistentWorker()!.posted.filter(m => m.type === 'simAllGames');
+      expect(runs.length).toBeGreaterThan(before);
+      expect((runs[runs.length - 1] as { config: { squareSelection?: string } }).config.squareSelection).toBe('ddSeek');
+    }, { timeout: 3000 });
+  });
 
   it('default mode: runs the win-rate sweep only — no delta computation, no V-table build', async () => {
     render(<App />);

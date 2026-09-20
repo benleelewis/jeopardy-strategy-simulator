@@ -706,8 +706,14 @@ export default function App() {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
+  // `games` is here because the guard above reads a ref that only flips in
+  // the worker-init effect (keyed on `games`). Without it, a cold load that
+  // opens on All Games ran this effect once before games.json arrived,
+  // bailed, and never ran again: the landing grid stayed "not yet
+  // simulated" until the user touched a knob. The three DD knobs are here
+  // because they enter the sweep through `config` but were never deps.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, position.x, position.y, xAxis, yAxis, includeFJ, pinnedValues, ddStrategy, cachedValueTable]);
+  }, [tab, games, position.x, position.y, xAxis, yAxis, includeFJ, pinnedValues, ddStrategy, cachedValueTable, seekDD, opponentSeekDD, ddDifficultyScaling]);
 
   // --- Handlers ---
 
