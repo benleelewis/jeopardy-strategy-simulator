@@ -28,7 +28,7 @@
 - [x] Initialize git repo
 - [x] Scaffold React + Vite + TypeScript project
 - [x] Set up Vitest
-- [ ] Deploy to Vercel (empty shell)
+- [x] Deploy to Vercel (empty shell) — superseded, live since 2026-09-08
 
 ## Phase 1A: Simulation Engine (sim-engine.ts)
 - [x] Port v2 simulation logic to TypeScript (pure functions, zero deps)
@@ -104,10 +104,10 @@
 
 ## Phase 1D: Animated Game Replay (FUTURE)
 - [ ] Game state tracker (clue-by-clue score evolution)
-- [ ] 15-second animation with D3 transitions
-- [ ] DD flash + FJ dramatic resolution
-- [ ] Cancel/restart controls (track animation ID)
-- [ ] "Watch a Game" button in main UI
+- [x] 15-second animation with D3 transitions — GameReplay, 2026-09-19
+- [x] DD flash + FJ dramatic resolution — 2026-09-19
+- [x] Cancel/restart controls (track animation ID) — play/pause/restart/speed/scrubber, timers cleared on unmount, 2026-09-19
+- [x] "Watch a Game" button in main UI — in GameDetail, 2026-09-19
 
 ## Phase 1E: Game Outcome Histogram (SUPERSEDED by Your Number)
 - [x] Run sims from current position → histogram in YourNumber component
@@ -118,10 +118,10 @@
 ## Phase 1F: Personal Game Analyzer (PARTIALLY COMPLETE)
 - [x] Manual entry form (correct/wrong counts, Coryat, DD/FJ wagers)
 - [x] Input validation (reasonable ranges)
-- [ ] J-Archive single-URL fetch (with CORS fallback) — needs Vercel API route
-- [ ] J-Archive HTML parser (try/catch → "couldn't parse" + manual entry)
+- [x] J-Archive single-URL fetch — GET /api/jarchive?game=<id>, one page per request, edge-cached a day, 2026-09-19
+- [x] J-Archive HTML parser — shared app/src/lib/jarchive.ts, 422 on checkpoint mismatch, manual entry still works, 2026-09-19
 - [x] Show game position on heat map (estimate → Explorer position)
-- [ ] DD wager analysis ("You bet $5000. Optimal was $12,400.")
+- [x] DD wager analysis — "You bet $X. Equity-optimal was $Y." in Your Game after a J-Archive load, 2026-09-19
 - [ ] What-if replay with different wagers
 
 ## Phase 1G: Data
@@ -142,7 +142,7 @@
 - [ ] Advanced 3-factor axis model toggle
 
 ## TODOS (from CEO review)
-- [ ] **P2**: DD impact difference map overlay — show WHERE DD strategy matters most on the K×B space
+- [x] **P2**: DD impact difference map overlay — 2026-09-11
 - [x] **P2**: Shareable URL — encode position + settings in URL hash for bookmarking/sharing (implemented in App.tsx with replaceState)
 - [ ] **P3**: Study planner — "If you study X hours, knowledge moves Y%" (needs data calibration first)
 

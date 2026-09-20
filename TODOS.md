@@ -4,16 +4,18 @@ Deferred work with context. Created 2026-07-03 by /autoplan (CEO review deferral
 
 ## From /autoplan 2026-07-03 (PLAN.md review)
 
-- [ ] **P2 — All Games optimal-vs-actual delta coloring.** Second color mode on the
+- [x] **P2 — All Games optimal-vs-actual delta coloring.** Second color mode on the
   contribution graph: how much better would you do with equity wagering vs your
   actual/heuristic strategy. Deferred: the All Games graph is Ben's 8/10 spine —
   don't touch it until PLAN.md Track E is proven stable. Depends on: E-3, E-4.
+  Done 2026-09-19: 'Gain from optimal play' color mode, paired seeds, byte-identical default proven by test. Default knobs: 32.3% → 35.0% (+2.7pp) at 25 sims/game.
 - [x] **P3 — Your Number share card.** Exportable image of "You'd win N% of all
   games" + histogram. Outside current blast radius.
   Done 2026-09-11: Share button in YourNumber renders a 1200×630 PNG; Web Share on phones, download elsewhere.
-- [ ] **P3 — Strategy-oracle full ranking** (design doc Screen 3). Rank ALL
+- [x] **P3 — Strategy-oracle full ranking** (design doc Screen 3). Rank ALL
   dimensions by marginal win-rate return at your position. Depends on: honest axes
   (P-1) + accurate wagering (Track E). The 12-month trajectory item.
+  Done 2026-09-19: StrategyOracle in the Explorer side panel, one realistic step per knob, paired SE, rows within noise greyed.
 - [x] **P3 — Mobile Explorer layout** (design doc Open Question #5). 3-column layout
   fails on mobile; needs tab/accordion pattern. Fails the "show someone at a bar" test.
   Done 2026-09-11: Explorer stacks below 768px, heat map first via SVG viewBox, panels in native <details>.

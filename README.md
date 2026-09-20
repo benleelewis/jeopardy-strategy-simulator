@@ -17,17 +17,30 @@ Live app: https://jeopardy-strategy-simulator.vercel.app
 from September 1984 to July 2025 are drawn as one colored square each, arranged
 by season and air date. The color is how often you would win that specific game,
 against the two people who were actually there. You can click a season to open
-it as a calendar, and click a game to see the scores and the simulated result.
+it as a calendar, and click a game to see the scores, the Daily Doubles with the
+wager the equity model would have made, and a "Watch this game" replay that
+plays the simulated game back clue by clue. A second color mode, "Gain from
+optimal play", shows how much each game would improve with equity wagering and
+Daily Double seeking. A Share button turns the headline into an image.
 
 **Explorer.** This is a map of win rate over two skills that you choose. You
 drag a marker to your own position and read your win rate off the map. The
 markers for Ken Jennings, James Holzhauer, Brad Rutter, Amy Schneider, and
 Watson are placed from their published statistics, so you can see where you sit
-relative to them.
+relative to them. Below the map, "What to work on" ranks every setting by how
+much your win rate would change if you moved it one realistic step, with the
+noise of the estimate shown next to each number. A "Show DD impact" toggle
+recolors the map by how much your Daily Double strategy is worth at each point.
 
 **Your game.** If you have been on the show, enter what you scored and the app
-works out the knowledge and buzzer speed those numbers imply. If you have not,
-there are presets for an average player and a strong player.
+works out the knowledge and buzzer speed those numbers imply. You can also type
+a J-Archive game ID, pick yourself from the three contestants, and see what you
+wagered on each Daily Double next to what the equity model would have wagered.
+If you have not been on the show, there are presets for an average player and a
+strong player.
+
+The Explorer works on a phone, and the All Games grid has a text alternative
+and keyboard controls for screen readers.
 
 ## The data pipeline
 
@@ -77,10 +90,30 @@ win rates of 36.4%, 43.2%, and 55.2% at three wager sizes, against the paper's
 36%, 45%, and 55%. The largest error is 1.8 percentage points. This runs as a
 test, so a change to the engine that breaks the agreement fails the build.
 
-There are 88 tests in total. They cover the boundary cases, e.g., a player who
+There are 217 tests in total. They cover the boundary cases, e.g., a player who
 answers everything correctly wins more than 90% of the time. They also cover
 monotonicity, which means that raising your knowledge or your buzzer speed never
-lowers your win rate. Run them with `npm test`.
+lowers your win rate. A set of regression locks records the exact scores of
+seeded games, so any change to the engine that alters the default behavior
+fails the build even if every other test passes. Run them with `npm test`.
+
+## Modeling choices worth knowing about
+
+**Daily Double seeking.** The engine can play Tesauro's square selection rule,
+which picks the square that maximises the chance of finding a Daily Double plus
+a small weight on keeping control of the board. It is off by default and there
+is a checkbox for it. With it on, a strong player finds 2.0 Daily Doubles per
+game instead of 1.3.
+
+**Daily Double accuracy.** By default the engine applies the same
+difficulty-by-row scaling to Daily Doubles that it applies to every other clue,
+so a bottom-row Daily Double is harder than a top-row one. Tesauro's paper
+models Daily Double accuracy as one flat number instead. The difference matters
+for how much seeking is worth: with the flat model a strong player gains about
+10 percentage points of win rate from seeking, and with row scaling about 1
+point, because a hard Daily Double at a large wager is close to a coin flip.
+There is a checkbox for the flat model under the Explorer's controls, and the
+default is the row-scaled one.
 
 ## Running it locally
 
