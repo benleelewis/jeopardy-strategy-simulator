@@ -12,14 +12,18 @@
  * per-DD data model there, deferred to TODOS).
  */
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   queryV, equityWager, buildValueTable,
   type ValueTable, type EquityWagerYou,
 } from '../sim/value-function';
 import { DEFAULT_CONFIG, mulberry32 } from '../sim/sim-engine';
 import { OPPONENT_PROFILES } from '../sim/opponent-models';
-import type { JArchiveGameResponse, JArchiveDDEvent } from '../lib/jarchive';
+import type { JArchiveGameResponse, JArchiveDDEvent, GameRecord } from '../lib/jarchive';
+import {
+  backtestHeadline, ARM_LABELS, BACKTEST_ARMS,
+  type BacktestResult, type BacktestArm, type ArmEstimate,
+} from '../sim/backtest';
 
 export interface GameEstimate {
   knowledge: number;   // b × p composite
@@ -33,13 +37,66 @@ export interface GameEstimate {
   fjCorrect?: boolean;
 }
 
+/** What "Backtest this game" sends to the worker (sim-worker.ts's
+ *  `backtestGame` message, minus the type tag). */
+export interface BacktestRequest {
+  record: GameRecord;
+  seat: number;
+  valueTable?: ValueTable;
+}
+
+/** Runs a backtest and reports back; returns a cancel function. Injected
+ *  so tests can feed a fixture result without a real Worker — the default
+ *  (`workerBacktestRunner`) posts `backtestGame` to a dedicated worker. */
+export type BacktestRunner = (
+  req: BacktestRequest,
+  hooks: {
+    onProgress: (pct: number) => void;
+    onResult: (result: BacktestResult) => void;
+    onError: (message: string) => void;
+  },
+) => () => void;
+
 interface Props {
   onEstimate: (estimate: GameEstimate) => void;
   /** App's cached V-table (E-2), when Optimal (equity) has been built on
    *  the Explorer tab — the equity mini-chart reuses it instead of
    *  building its own when present (E-7 item 5's documented choice). */
   sharedValueTable?: ValueTable;
+  /** Override how "Backtest this game" runs (tests). */
+  backtestRunner?: BacktestRunner;
 }
+
+/**
+ * Default backtest runner: one dedicated worker per run (terminated on
+ * cancel or completion), so a backtest never queues behind the persistent
+ * all-games worker in App.tsx, and its `cancel` message can't interrupt an
+ * in-flight All Games sweep. The V(S) table is structured-cloned across —
+ * a few hundred KB, once per click.
+ */
+const workerBacktestRunner: BacktestRunner = (req, hooks) => {
+  const worker = new Worker(new URL('../sim/sim-worker.ts', import.meta.url), { type: 'module' });
+  let finished = false;
+  const finish = () => { finished = true; worker.terminate(); };
+  worker.onmessage = (e: MessageEvent) => {
+    const msg = e.data;
+    if (finished) return;
+    if (msg.type === 'backtestProgress') hooks.onProgress(msg.pct);
+    else if (msg.type === 'backtestResult') { finish(); hooks.onResult(msg.result); }
+    else if (msg.type === 'backtestError') { finish(); hooks.onError(msg.message); }
+  };
+  worker.onerror = () => {
+    if (finished) return;
+    finish();
+    hooks.onError('The backtest worker crashed.');
+  };
+  worker.postMessage({ type: 'backtestGame', record: req.record, seat: req.seat, valueTable: req.valueTable, requestId: 1 });
+  return () => {
+    if (finished) return;
+    worker.postMessage({ type: 'cancel' });
+    finish();
+  };
+};
 
 /** Absurd-input ceiling for the free-text DD/FJ wager fields (E-7's
  *  "existing input validation gap fixed in passing" — GameAnalyzer.tsx:55
@@ -90,7 +147,7 @@ function rotateToSeat<T>(arr: readonly T[], seat: number): [T, T, T] {
   return [arr[seat], rest[0], rest[1]];
 }
 
-export function GameAnalyzer({ onEstimate, sharedValueTable }: Props) {
+export function GameAnalyzer({ onEstimate, sharedValueTable, backtestRunner = workerBacktestRunner }: Props) {
   const [correct, setCorrect] = useState(18);
   const [wrong, setWrong] = useState(3);
   const [coryat, setCoryat] = useState(16000);
@@ -109,8 +166,25 @@ export function GameAnalyzer({ onEstimate, sharedValueTable }: Props) {
   const [jarchiveGame, setJarchiveGame] = useState<JArchiveGameResponse | null>(null);
   const [jarchiveContestant, setJarchiveContestant] = useState<string | null>(null);
 
+  // "Backtest this game" (TASKS.md Phase 3).
+  const [backtestStatus, setBacktestStatus] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [backtestProgress, setBacktestProgress] = useState(0);
+  const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
+  const backtestCancelRef = useRef<(() => void) | null>(null);
+
   const ddWagerParsed = parseWagerInput(ddWagerRaw);
   const fjWagerParsed = parseWagerInput(fjWagerRaw);
+
+  const cancelBacktest = useCallback(() => {
+    backtestCancelRef.current?.();
+    backtestCancelRef.current = null;
+    setBacktestStatus('idle');
+    setBacktestProgress(0);
+  }, []);
+
+  // Any in-flight backtest dies with the component.
+  useEffect(() => () => { backtestCancelRef.current?.(); }, []);
 
   const handleLoadJArchive = useCallback(async () => {
     const trimmed = jarchiveGameId.trim();
@@ -156,6 +230,12 @@ export function GameAnalyzer({ onEstimate, sharedValueTable }: Props) {
   const handlePickContestant = useCallback((name: string) => {
     const c = jarchiveGame?.contestants.find(x => x.name === name);
     if (!c) return;
+    // A backtest belongs to one contestant — drop it when the pick changes.
+    backtestCancelRef.current?.();
+    backtestCancelRef.current = null;
+    setBacktestStatus('idle');
+    setBacktestResult(null);
+    setBacktestError(null);
     setJarchiveContestant(name);
     setCorrect(c.correct);
     setWrong(c.wrong);
@@ -166,6 +246,33 @@ export function GameAnalyzer({ onEstimate, sharedValueTable }: Props) {
     if (!jarchiveGame || !jarchiveContestant) return [];
     return jarchiveGame.dailyDoubles.filter(dd => dd.who === jarchiveContestant);
   }, [jarchiveGame, jarchiveContestant]);
+
+  const handleBacktest = useCallback(() => {
+    if (!jarchiveGame?.record || !jarchiveContestant) return;
+    const seat = jarchiveGame.players.indexOf(jarchiveContestant);
+    if (seat < 0) return;
+    backtestCancelRef.current?.();
+    setBacktestStatus('running');
+    setBacktestProgress(0);
+    setBacktestResult(null);
+    setBacktestError(null);
+    backtestCancelRef.current = backtestRunner(
+      { record: jarchiveGame.record, seat, valueTable: sharedValueTable },
+      {
+        onProgress: pct => setBacktestProgress(pct),
+        onResult: result => {
+          backtestCancelRef.current = null;
+          setBacktestResult(result);
+          setBacktestStatus('done');
+        },
+        onError: message => {
+          backtestCancelRef.current = null;
+          setBacktestError(message);
+          setBacktestStatus('error');
+        },
+      },
+    );
+  }, [jarchiveGame, jarchiveContestant, sharedValueTable, backtestRunner]);
 
   const handleSubmit = useCallback(() => {
     // Knowledge = accuracy when buzzing (epsilon smoothing)
@@ -363,6 +470,46 @@ export function GameAnalyzer({ onEstimate, sharedValueTable }: Props) {
                     </li>
                   ))}
                 </ul>
+              )}
+            </div>
+          )}
+
+          {jarchiveGame && jarchiveContestant && jarchiveGame.record && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button
+                  onClick={backtestStatus === 'running' ? cancelBacktest : handleBacktest}
+                  style={{
+                    padding: '6px 14px',
+                    border: '1px solid var(--accent)',
+                    borderRadius: 4,
+                    background: backtestStatus === 'running' ? 'transparent' : 'var(--accent)',
+                    color: backtestStatus === 'running' ? 'var(--accent)' : '#fff',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {backtestStatus === 'running' ? 'Cancel' : backtestStatus === 'done' ? 'Backtest again' : 'Backtest this game'}
+                </button>
+                {backtestStatus === 'running' && (
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }} role="status">
+                    Backtesting… {Math.round(backtestProgress * 100)}%
+                  </span>
+                )}
+              </div>
+              {backtestStatus === 'idle' && (
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Replays this game with different Daily Double wagers and rolls the rest forward 1,500 times each.
+                  {sharedValueTable ? '' : ' Equity wagers use a direct wager search here; build Optimal (equity) in the Explorer to use its table.'}
+                </div>
+              )}
+              {backtestStatus === 'error' && (
+                <div style={hintStyle}>Backtest failed: {backtestError}</div>
+              )}
+              {backtestStatus === 'done' && backtestResult && (
+                <BacktestReport result={backtestResult} />
               )}
             </div>
           )}
@@ -673,6 +820,104 @@ function EquityMiniChart({
           ? "Using the Explorer's Optimal (equity) strategy table."
           : 'Using a small preview table (generic mid-game scenario, tied opponents) — select Optimal (equity) on the Explorer tab for the validated version.'}
       </div>
+    </div>
+  );
+}
+
+const money = (n: number) => (n < 0 ? `-$${Math.abs(n).toLocaleString()}` : `$${n.toLocaleString()}`);
+const percent = (v: number) => `${Math.round(v * 100)}%`;
+
+/** One table cell of the backtest: "$w → 44%", plus the paired delta
+ *  against the actual wager for the other arms. */
+function BacktestCell({ est, arm }: { est: ArmEstimate | null; arm: BacktestArm }) {
+  if (!est) return <td style={backtestCellStyle}><span style={{ color: 'var(--text-muted)' }}>skipped</span></td>;
+  const delta = Math.round(est.deltaVsActual * 100);
+  const sign = delta > 0 ? '+' : '';
+  return (
+    <td style={backtestCellStyle}>
+      <span style={{ fontFamily: 'monospace' }}>{money(est.wager)}</span>
+      <span style={{ color: 'var(--text-muted)' }}> → </span>
+      <span style={{ fontWeight: 600 }}>{percent(est.winRate)}</span>
+      {arm !== 'actual' && (
+        <span style={{ fontSize: 10, color: delta > 0 ? '#26a641' : delta < 0 ? '#dc2626' : 'var(--text-muted)', marginLeft: 4 }}>
+          ({sign}{delta})
+        </span>
+      )}
+    </td>
+  );
+}
+
+const backtestCellStyle: React.CSSProperties = {
+  padding: '4px 6px',
+  fontSize: 11,
+  whiteSpace: 'nowrap',
+  borderBottom: '1px solid var(--border)',
+  color: 'var(--text-h)',
+};
+
+/**
+ * "Backtest this game" result: a headline in plain words, one row per
+ * Daily Double you hit (wager → win chance per arm), the whole-game line,
+ * and the judgment calls that applied.
+ */
+function BacktestReport({ result }: { result: BacktestResult }) {
+  const headline = backtestHeadline(result);
+  if (result.rows.length === 0 || !result.summary) {
+    return (
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }} data-testid="backtest-headline">
+        {headline}
+      </div>
+    );
+  }
+  const summary = result.summary;
+  const columns: { arm: BacktestArm; label: string }[] = BACKTEST_ARMS.map(arm => ({ arm, label: ARM_LABELS[arm] }));
+  const pm = Math.max(1, Math.round((summary.arms.equity?.deltaSe ?? summary.arms.actual?.se ?? 0.01) * 100));
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-h)', marginBottom: 6 }} data-testid="backtest-headline">
+        {headline}
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', width: '100%' }} aria-label="Backtest results by Daily Double">
+          <thead>
+            <tr>
+              <th style={{ ...backtestCellStyle, textAlign: 'left', color: 'var(--text-muted)', fontWeight: 500 }}>Daily Double</th>
+              {columns.map(c => (
+                <th key={c.arm} style={{ ...backtestCellStyle, textAlign: 'left', color: 'var(--text-muted)', fontWeight: 500 }}>{c.label}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {result.rows.map(row => (
+              <tr key={row.stepIndex}>
+                <td style={backtestCellStyle}>
+                  {row.round === 'J' ? 'Jeopardy' : 'Double Jeopardy'}, {money(row.clueValue)} clue
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                    you had {money(row.scoreBefore)}, {row.cluesRemainingAfter} clues left
+                  </div>
+                </td>
+                {columns.map(c => <BacktestCell key={c.arm} est={row.arms[c.arm]} arm={c.arm} />)}
+              </tr>
+            ))}
+            <tr>
+              <td style={{ ...backtestCellStyle, fontWeight: 600 }}>
+                Whole game
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 400 }}>from {summary.fromLabel}</div>
+              </td>
+              {columns.map(c => <BacktestCell key={c.arm} est={summary.arms[c.arm]} arm={c.arm} />)}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
+        Win chance per arm; in parentheses, the change against your actual wager in points (paired rollouts, give or take about {pm}).
+      </div>
+      <details style={{ marginTop: 6 }}>
+        <summary style={{ fontSize: 11, color: 'var(--accent)', cursor: 'pointer' }}>How this was computed</summary>
+        <ul style={{ margin: '4px 0 0', paddingLeft: 16, fontSize: 10, color: 'var(--text-muted)' }}>
+          {result.notes.map((n, i) => <li key={i} style={{ marginBottom: 2 }}>{n}</li>)}
+        </ul>
+      </details>
     </div>
   );
 }

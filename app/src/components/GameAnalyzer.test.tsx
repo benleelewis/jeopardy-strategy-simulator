@@ -2,8 +2,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { GameAnalyzer } from './GameAnalyzer';
-import type { JArchiveGameResponse } from '../lib/jarchive';
+import { GameAnalyzer, type BacktestRunner } from './GameAnalyzer';
+import type { JArchiveGameResponse, GameRecord } from '../lib/jarchive';
+import type { BacktestResult, ArmEstimate } from '../sim/backtest';
 
 async function openAdvanced(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByText('Show DD & FJ details'));
@@ -174,4 +175,152 @@ describe('GameAnalyzer — load from J-Archive', () => {
 
     expect(await screen.findByText(/isn't available in this dev server/)).toBeInTheDocument();
   });
+});
+
+// ─── "Backtest this game" (TASKS.md Phase 3) ─────────────────────────────
+
+const FAKE_RECORD: GameRecord = {
+  players: ['Sam', 'Grace', 'Joey'],
+  cluesPlayed: 57,
+  stats: [
+    { correct: 14, wrong: 3, coryat: 8600 },
+    { correct: 25, wrong: 3, coryat: 20200 },
+    { correct: 12, wrong: 1, coryat: 7400 },
+  ],
+  endOfJ: [1800, 4800, 0],
+  endOfDJ: [7800, 29200, 7000],
+  steps: [
+    {
+      round: 'DJ', order: 23, boundValue: 800, isDD: true, ddPlayer: 1, wager: 10000, ddCorrect: true,
+      deltas: [0, 10000, 0], before: [7800, 19200, 7000], after: [7800, 29200, 7000],
+      remainingValuesAfter: [400, 800, 1200, 1600, 2000, 400, 800], remainingDDsAfter: 0,
+    },
+  ],
+};
+
+const est = (wager: number, winRate: number, deltaVsActual = 0, deltaSe = 0.004): ArmEstimate =>
+  ({ wager, winRate, se: 0.01, deltaVsActual, deltaSe });
+
+const FAKE_BACKTEST: BacktestResult = {
+  you: 'Grace',
+  seat: 1,
+  players: [],
+  rolloutsPerArm: 1500,
+  seed: 1,
+  rows: [{
+    stepIndex: 0, round: 'DJ', order: 23, clueValue: 800, scoreBefore: 19200,
+    allScoresBefore: [7800, 19200, 7000], cluesRemainingAfter: 7,
+    actualWager: 10000, actualCorrect: true, pCorrect: 0.89,
+    arms: {
+      actual: est(10000, 0.38),
+      equity: est(5, 0.44, 0.06, 0.02),
+      allIn: est(19200, 0.31, -0.07, 0.03),
+      minimum: est(5, 0.44, 0.06, 0.02),
+    },
+    equitySource: 'rollout',
+  }],
+  summary: {
+    fromLabel: 'the start of Double Jeopardy',
+    ddCount: 1,
+    arms: {
+      actual: est(10000, 0.38),
+      equity: est(5, 0.44, 0.06, 0.02),
+      allIn: est(19200, 0.31, -0.07, 0.03),
+      minimum: est(5, 0.44, 0.06, 0.02),
+    },
+  },
+  notes: ['Right/wrong on each Daily Double is drawn from precision.'],
+};
+
+describe('GameAnalyzer — Backtest this game', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function stubGame(game: JArchiveGameResponse) {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      text: async () => JSON.stringify(game),
+    } as Response)));
+  }
+
+  it('shows the button only after a contestant is chosen', async () => {
+    stubGame({ ...FAKE_GAME, record: FAKE_RECORD });
+    const user = userEvent.setup();
+    render(<GameAnalyzer onEstimate={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'Backtest this game' })).not.toBeInTheDocument();
+    await loadFakeGame(user);
+    expect(screen.queryByRole('button', { name: 'Backtest this game' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Grace' }));
+    expect(screen.getByRole('button', { name: 'Backtest this game' })).toBeInTheDocument();
+  }, 15000);
+
+  it('is not offered when the API response carries no clue record', async () => {
+    stubGame(FAKE_GAME);
+    const user = userEvent.setup();
+    render(<GameAnalyzer onEstimate={vi.fn()} />);
+    await loadFakeGame(user);
+    await user.click(screen.getByRole('button', { name: 'Grace' }));
+    expect(screen.queryByRole('button', { name: 'Backtest this game' })).not.toBeInTheDocument();
+  }, 15000);
+
+  it('runs the injected runner with the chosen seat and renders the headline and table', async () => {
+    stubGame({ ...FAKE_GAME, record: FAKE_RECORD });
+    const runner = vi.fn<BacktestRunner>((req, hooks) => {
+      expect(req.seat).toBe(1);
+      expect(req.record).toEqual(FAKE_RECORD);
+      hooks.onProgress(0.5);
+      hooks.onResult(FAKE_BACKTEST);
+      return () => {};
+    });
+    const user = userEvent.setup();
+    render(<GameAnalyzer onEstimate={vi.fn()} backtestRunner={runner} />);
+    await loadFakeGame(user);
+    await user.click(screen.getByRole('button', { name: 'Grace' }));
+    await user.click(screen.getByRole('button', { name: 'Backtest this game' }));
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(await screen.findByTestId('backtest-headline')).toHaveTextContent(
+      'With equity wagering at your Daily Double, your chance of winning this game goes from 38% to 44% (± 2).',
+    );
+    const table = screen.getByRole('table', { name: 'Backtest results by Daily Double' });
+    expect(table).toHaveTextContent('Double Jeopardy, $800 clue');
+    expect(table).toHaveTextContent('$10,000 → 38%');
+    expect(table).toHaveTextContent('$19,200 → 31%');
+    expect(table).toHaveTextContent('Whole game');
+    expect(screen.getByRole('button', { name: 'Backtest again' })).toBeInTheDocument();
+  }, 15000);
+
+  it('shows the 0-DD message when you hit no Daily Double', async () => {
+    stubGame({ ...FAKE_GAME, record: FAKE_RECORD });
+    const runner: BacktestRunner = (_req, hooks) => {
+      hooks.onResult({ ...FAKE_BACKTEST, you: 'Sam', seat: 0, rows: [], summary: null });
+      return () => {};
+    };
+    const user = userEvent.setup();
+    render(<GameAnalyzer onEstimate={vi.fn()} backtestRunner={runner} />);
+    await loadFakeGame(user);
+    await user.click(screen.getByRole('button', { name: 'Sam' }));
+    await user.click(screen.getByRole('button', { name: 'Backtest this game' }));
+    expect(await screen.findByTestId('backtest-headline')).toHaveTextContent('Sam did not hit a Daily Double in this game.');
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  }, 15000);
+
+  it('shows progress while running, and Cancel calls the runner\'s cancel', async () => {
+    stubGame({ ...FAKE_GAME, record: FAKE_RECORD });
+    const cancel = vi.fn();
+    const runner: BacktestRunner = (_req, hooks) => {
+      hooks.onProgress(0.4);
+      return cancel;
+    };
+    const user = userEvent.setup();
+    render(<GameAnalyzer onEstimate={vi.fn()} backtestRunner={runner} />);
+    await loadFakeGame(user);
+    await user.click(screen.getByRole('button', { name: 'Grace' }));
+    await user.click(screen.getByRole('button', { name: 'Backtest this game' }));
+    expect(screen.getByRole('status')).toHaveTextContent('Backtesting… 40%');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Backtest this game' })).toBeInTheDocument();
+  }, 15000);
 });

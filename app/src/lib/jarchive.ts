@@ -475,4 +475,92 @@ export interface JArchiveGameResponse {
   };
   contestants: JArchiveContestantSummary[];
   dailyDoubles: JArchiveDDEvent[];
+  /** Clue-by-clue record for "Backtest this game" (app/src/sim/backtest.ts).
+   *  Optional: older cached responses and test fixtures may omit it, in
+   *  which case the backtest button is not offered. */
+  record?: GameRecord;
+}
+
+// ─── Backtest record (app/src/sim/backtest.ts's input) ───────────────────
+
+/**
+ * One played clue, reduced to what a strategy backtest needs: who gained or
+ * lost what, and what the board looked like afterwards. Names are dropped in
+ * favour of podium indices so the sim side never has to know nicknames.
+ */
+export interface RecordStep {
+  round: Round;
+  /** Selection order within the round. */
+  order: number;
+  boundValue: number;
+  isDD: boolean;
+  /** Podium index of the Daily Double taker, or -1 for a regular clue (or a
+   *  DD nobody responded to on record). */
+  ddPlayer: number;
+  /** DD wager as recorded, or null for a regular clue. */
+  wager: number | null;
+  /** Whether the DD taker was right (DD only; false otherwise). */
+  ddCorrect: boolean;
+  /** Score change per player, podium order. Sums the wrong-answer
+   *  penalties and the correct-answer credit for this clue. */
+  deltas: number[];
+  /** Scores before this clue, podium order. */
+  before: number[];
+  /** Scores after this clue, podium order. */
+  after: number[];
+  /** Face values still unrevealed in this round after this clue resolves. */
+  remainingValuesAfter: number[];
+  /** Daily Doubles still unfound in this round after this clue resolves. */
+  remainingDDsAfter: number;
+}
+
+export interface GameRecord {
+  /** Podium nicknames, left to right. */
+  players: string[];
+  /** Number of clues actually revealed (both rounds). */
+  cluesPlayed: number;
+  /** Per-player box score — `playerStats` minus the name. */
+  stats: { correct: number; wrong: number; coryat: number }[];
+  /** Scores at the end of the Jeopardy round (start of Double Jeopardy). */
+  endOfJ: number[];
+  /** Scores at the end of Double Jeopardy (going into Final). */
+  endOfDJ: number[];
+  /** Every played clue in play order, J round first. */
+  steps: RecordStep[];
+}
+
+/**
+ * Build the compact clue-by-clue record a strategy backtest consumes from a
+ * parsed game. Pure — the same function serves the CLI (`scripts/backtest.ts`)
+ * and the Vercel route (which ships it to the browser in the API response).
+ */
+export function gameRecord(game: ParsedGame): GameRecord {
+  const rep = replay(game);
+  const stats = playerStats(game).map(s => ({ correct: s.correct, wrong: s.wrong, coryat: s.coryat }));
+  const steps: RecordStep[] = rep.steps.map(s => {
+    const who = s.clue.right ?? s.clue.wrong[0] ?? null;
+    const ddPlayer = s.clue.isDD && who !== null ? game.players.indexOf(who) : -1;
+    return {
+      round: s.clue.round,
+      order: s.clue.order as number,
+      boundValue: s.clue.boundValue,
+      isDD: s.clue.isDD,
+      ddPlayer,
+      wager: s.clue.isDD ? (s.clue.wager ?? 0) : null,
+      ddCorrect: s.clue.isDD && s.clue.right !== null,
+      deltas: s.after.map((v, i) => v - s.before[i]),
+      before: [...s.before],
+      after: [...s.after],
+      remainingValuesAfter: [...s.remainingValues],
+      remainingDDsAfter: s.remainingDDs,
+    };
+  });
+  return {
+    players: [...game.players],
+    cluesPlayed: steps.length,
+    stats,
+    endOfJ: [...(rep.endOfRound.J ?? new Array(game.players.length).fill(0))],
+    endOfDJ: [...(rep.endOfRound.DJ ?? new Array(game.players.length).fill(0))],
+    steps,
+  };
 }

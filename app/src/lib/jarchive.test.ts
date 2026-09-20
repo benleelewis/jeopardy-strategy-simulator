@@ -14,7 +14,7 @@
  * fixture (`npx tsx scripts/dd-advisor.ts --game 9501 --list`), not guessed.
  */
 import { describe, it, expect } from 'vitest';
-import { parseGame, replay, playerStats } from './jarchive';
+import { parseGame, replay, playerStats, gameRecord } from './jarchive';
 import fixtureHtml from './__fixtures__/game-9501.html?raw';
 
 function loadFixture(): string {
@@ -72,5 +72,41 @@ describe('parseGame + replay (game 9501 fixture)', () => {
       { name: 'Grace', correct: 25, wrong: 3, coryat: 20200, ddsFound: 2 },
       { name: 'Joey', correct: 12, wrong: 1, coryat: 7400, ddsFound: 1 },
     ]);
+  });
+});
+
+describe('gameRecord (backtest input, game 9501 fixture)', () => {
+  const game = parseGame(fixtureHtml);
+  const record = gameRecord(game);
+
+  it('lists every played clue in play order with a consistent score chain', () => {
+    expect(record.players).toEqual(game.players);
+    expect(record.cluesPlayed).toBe(record.steps.length);
+    expect(record.steps.length).toBe(game.clues.filter(c => c.order !== null).length);
+    for (let i = 1; i < record.steps.length; i++) {
+      expect(record.steps[i].before).toEqual(record.steps[i - 1].after);
+    }
+    for (const s of record.steps) {
+      expect(s.after).toEqual(s.before.map((v, i) => v + s.deltas[i]));
+    }
+    const lastJ = record.steps.filter(s => s.round === 'J').pop()!;
+    expect(record.endOfJ).toEqual(lastJ.after);
+    expect(record.endOfDJ).toEqual(record.steps[record.steps.length - 1].after);
+  });
+
+  it("carries the three Daily Doubles with taker, wager, and the board left afterwards", () => {
+    const dds = record.steps.filter(s => s.isDD);
+    expect(dds.map(d => [d.round, d.order, record.players[d.ddPlayer], d.wager, d.ddCorrect])).toEqual([
+      ['J', 12, 'Grace', 1400, true],
+      ['DJ', 7, 'Joey', 2000, true],
+      ['DJ', 23, 'Grace', 10000, true],
+    ]);
+    expect(dds[0].remainingValuesAfter).toHaveLength(18);
+    expect(dds[0].remainingDDsAfter).toBe(0);
+    expect(dds[1].remainingDDsAfter).toBe(1);
+    expect(dds[2].remainingValuesAfter).toHaveLength(7);
+    expect(dds[2].before).toEqual([7800, 19200, 7000]);
+    // Stats match the per-player box score.
+    expect(record.stats).toEqual(playerStats(game).map(s => ({ correct: s.correct, wrong: s.wrong, coryat: s.coryat })));
   });
 });

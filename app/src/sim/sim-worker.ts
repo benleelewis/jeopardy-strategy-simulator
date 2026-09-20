@@ -77,6 +77,14 @@
  *   OUT: { type: 'outcomesProgress', pct, requestId }
  *   OUT: { type: 'outcomesResult', outcomes: OutcomeRow[], runawayShare,
  *          lockAgainstShare, decidedShare, requestId }
+ *   IN:  { type: 'backtestGame', record, seat, valueTable?, rolloutsPerArm?,
+ *          seed?, equityFallback?, requestId? }
+ *        "Backtest this game" (TASKS.md Phase 3): runs sim/backtest.ts on a
+ *        J-Archive GameRecord — per-DD wagering arms plus the game-level
+ *        summary — with progress, and cancellable via 'cancel'.
+ *   OUT: { type: 'backtestProgress', pct, requestId }
+ *   OUT: { type: 'backtestResult', result, requestId }
+ *   OUT: { type: 'backtestError', message, requestId }
  */
 
 import {
@@ -91,6 +99,7 @@ import {
   DEFAULT_CONFIG,
 } from './sim-engine';
 import { buildValueTable, type ValueTable } from './value-function';
+import { backtestGame } from './backtest';
 import { DIMENSIONS, buildSimParams, type DimensionName } from './dimensions';
 import { calibrateOpponent } from './calibrate';
 import {
@@ -337,6 +346,26 @@ self.onmessage = (e: MessageEvent) => {
     if (result === null) return; // cancelled — drop silently, like computeGrid
 
     self.postMessage({ type: 'oracleResult', ...result });
+  }
+
+  if (msg.type === 'backtestGame') {
+    const { record, seat, valueTable, rolloutsPerArm, seed, equityFallback, requestId } = msg;
+    try {
+      const result = backtestGame(record, {
+        seat,
+        valueTable,
+        rolloutsPerArm,
+        seed,
+        equityFallback,
+        onProgress: (pct) => self.postMessage({ type: 'backtestProgress', pct, requestId }),
+        isCancelled: () => cancelled,
+      });
+      if (result === null) return; // cancelled — drop silently, like computeGrid
+      self.postMessage({ type: 'backtestResult', result, requestId });
+    } catch (err) {
+      self.postMessage({ type: 'backtestError', message: String(err), requestId });
+    }
+    return;
   }
 
   if (msg.type === 'simAllGames') {
