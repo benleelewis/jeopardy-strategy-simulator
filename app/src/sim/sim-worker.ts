@@ -759,6 +759,9 @@ export function computeOracle(
     baselineWinRate: estimates.baseline.winRate,
     gamesPerEstimate: games,
   };
+}
+
+/**
  * All Games "Gain from optimal play" (TODOS "P2 — All Games optimal-vs-actual
  * delta coloring") — pure per-game builder, exported for direct unit
  * testing (no `self`/postMessage dependency; the `computeGamesDelta`

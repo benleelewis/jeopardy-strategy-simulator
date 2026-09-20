@@ -84,6 +84,9 @@ describe("resolveDDStrategy keeps the user's Final Jeopardy toggle", () => {
   it('includeFJ: true is unchanged (the regression-locked default)', () => {
     const merged = resolveDDStrategy({ ...DEFAULT_CONFIG, includeFJ: true }, cell(), 'knowledge', 'buzzerSpeed');
     expect(merged.includeFJ).toBe(true);
+  });
+});
+
 describe('buildGamesDelta — All Games "Gain from optimal play" (TODOS P2 optimal-vs-actual)', () => {
   // A handful of historical-style games (same shape as games.json entries).
   const games = [
