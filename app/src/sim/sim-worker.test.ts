@@ -6,7 +6,11 @@
 // This file only calls the exported pure `buildDDImpactGrid` builder
 // directly; it never dispatches a message through `self.onmessage`.
 import { describe, it, expect } from 'vitest';
-import { buildDDImpactGrid, buildGamesDelta, computeOutcomes, resolveDDStrategy, computeWhatIfWager, DEFAULT_WHAT_IF_SEED } from './sim-worker';
+import {
+  buildDDImpactGrid, buildGamesDelta, computeOutcomes, resolveDDStrategy,
+  computeWhatIfWager, sampleRemainingBoardForRound, estimateRemainingDDCount,
+  DEFAULT_WHAT_IF_SEED, type WhatIfWagerEvent,
+} from './sim-worker';
 import { DEFAULT_CONFIG, mulberry32, playerFrom2Axis, simulateFromState, sampleOpponent, type SimConfig, type SimState, type Player } from './sim-engine';
 import { buildSimParams } from './dimensions';
 import { OPPONENT_PROFILES } from './opponent-models';

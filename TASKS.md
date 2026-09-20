@@ -111,9 +111,9 @@
 
 ## Phase 1E: Game Outcome Histogram (SUPERSEDED by Your Number)
 - [x] Run sims from current position → histogram in YourNumber component
-- [ ] Score distribution with D3 (future enhancement)
-- [ ] Win margin histogram
-- [ ] Variance visualization (tight vs wide distributions)
+- [x] Score distribution — OutcomeDistribution panel in the Explorer, 2026-09-20
+- [x] Win margin histogram — 2026-09-20
+- [x] Variance visualization — runaway / lock / decided-by-FJ shares plus 5th/95th percentiles, 2026-09-20
 
 ## Phase 1F: Personal Game Analyzer (PARTIALLY COMPLETE)
 - [x] Manual entry form (correct/wrong counts, Coryat, DD/FJ wagers)
@@ -122,7 +122,7 @@
 - [x] J-Archive HTML parser — shared app/src/lib/jarchive.ts, 422 on checkpoint mismatch, manual entry still works, 2026-09-19
 - [x] Show game position on heat map (estimate → Explorer position)
 - [x] DD wager analysis — "You bet $X. Equity-optimal was $Y." in Your Game after a J-Archive load, 2026-09-19
-- [ ] What-if replay with different wagers
+- [x] What-if replay with different wagers — per-DD paired rollout in GameDetail, 2026-09-20
 
 ## Phase 1G: Data
 - [ ] Curate static dataset from recent Jeopardy scorecards (JSON)
@@ -137,7 +137,7 @@
 
 ## Phase 3: Real Data & Community (Future)
 - [ ] Full J-Archive dataset integration (curated, static)
-- [ ] Backtest Ben's game (ep #8276) with different strategies
+- [x] Backtest any real game with different strategies — "Backtest this game" in Your Game after a J-Archive load, plus `npx tsx scripts/backtest.ts --game <id>`; run it on #8276 once that game is cached, 2026-09-20
 - [ ] Community features (sharing, leaderboards)
 - [ ] Advanced 3-factor axis model toggle
 

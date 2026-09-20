@@ -18,8 +18,9 @@ from September 1984 to July 2025 are drawn as one colored square each, arranged
 by season and air date. The color is how often you would win that specific game,
 against the two people who were actually there. You can click a season to open
 it as a calendar, and click a game to see the scores, the Daily Doubles with the
-wager the equity model would have made, and a "Watch this game" replay that
-plays the simulated game back clue by clue. A second color mode, "Gain from
+wager the equity model would have made, a "What if" box on each of your Daily
+Doubles that reruns the game from that point with a different wager, and a
+"Watch this game" replay that plays the simulated game back clue by clue. A second color mode, "Gain from
 optimal play", shows how much each game would improve with equity wagering and
 Daily Double seeking. A Share button turns the headline into an image.
 
@@ -29,13 +30,20 @@ markers for Ken Jennings, James Holzhauer, Brad Rutter, Amy Schneider, and
 Watson are placed from their published statistics, so you can see where you sit
 relative to them. Below the map, "What to work on" ranks every setting by how
 much your win rate would change if you moved it one realistic step, with the
-noise of the estimate shown next to each number. A "Show DD impact" toggle
-recolors the map by how much your Daily Double strategy is worth at each point.
+noise of the estimate shown next to each number. "How your games end" shows
+the spread of your final scores and win margins at that position, and how
+often the game is a runaway, a lock against you, or decided by Final Jeopardy.
+A "Show DD impact" toggle recolors the map by how much your Daily Double
+strategy is worth at each point.
 
 **Your game.** If you have been on the show, enter what you scored and the app
 works out the knowledge and buzzer speed those numbers imply. You can also type
 a J-Archive game ID, pick yourself from the three contestants, and see what you
 wagered on each Daily Double next to what the equity model would have wagered.
+"Backtest this game" then replays your Daily Doubles under four strategies
+(your actual wager, the equity wager, all in, and the minimum) and reports your
+chance of winning under each, with the noise of the estimate. The same analysis
+runs from the command line with `npx tsx scripts/backtest.ts --game <id>`.
 If you have not been on the show, there are presets for an average player and a
 strong player.
 
@@ -90,7 +98,7 @@ win rates of 36.4%, 43.2%, and 55.2% at three wager sizes, against the paper's
 36%, 45%, and 55%. The largest error is 1.8 percentage points. This runs as a
 test, so a change to the engine that breaks the agreement fails the build.
 
-There are 217 tests in total. They cover the boundary cases, e.g., a player who
+There are 258 tests in total. They cover the boundary cases, e.g., a player who
 answers everything correctly wins more than 90% of the time. They also cover
 monotonicity, which means that raising your knowledge or your buzzer speed never
 lowers your win rate. A set of regression locks records the exact scores of

@@ -1169,6 +1169,8 @@ export function computeOutcomes(
     lockAgainstShare: lockAgainstCount / nGames,
     decidedShare: decidedCount / nGames,
   };
+}
+
 // ─── "What if you had wagered differently?" (TASKS.md Phase 1F) ──────────
 
 /** Default seed for computeWhatIfWager — reproducible across repeat clicks
