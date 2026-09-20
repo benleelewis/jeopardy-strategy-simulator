@@ -85,17 +85,45 @@
  *   OUT: { type: 'backtestProgress', pct, requestId }
  *   OUT: { type: 'backtestResult', result, requestId }
  *   OUT: { type: 'backtestError', message, requestId }
+ *   IN:  { type: 'whatIfWager', requestId, gameIndex, ddEventIndex, you:
+ *          { knowledge, buzzerSpeed }, event: { round, scoresBefore,
+ *          cluesRemainingAfter, correct, wager }, whatIfWagerAmount,
+ *          config, n?, seed? }
+ *        "What if you had wagered differently?" (TASKS.md Phase 1F).
+ *        Resumes the recorded Daily Double from `event.scoresBefore` with
+ *        the outcome already applied per `event.correct`, then rolls the
+ *        rest of the game forward `n` times (default 2,000) via
+ *        `simulateFromState` — once under the ACTUAL wager
+ *        (`event.wager`), once under the WHAT-IF wager
+ *        (`whatIfWagerAmount`) — with paired per-rollout seeds (see
+ *        `computeWhatIfWager` below) so the two arms share every opponent
+ *        draw and clue outcome up to where the differing score changes a
+ *        downstream decision. Superseded by a newer `whatIfWager` or by
+ *        `cancelWhatIf` (below); a superseded request is dropped silently
+ *        (no result is ever posted for it).
+ *   OUT: { type: 'whatIfWagerResult', requestId, gameIndex, ddEventIndex,
+ *          actualWager, whatIfWagerAmount, actualWinRate, whatIfWinRate,
+ *          diff, se, n }
+ *
+ *   IN:  { type: 'cancelWhatIf' }
+ *        Invalidates any in-flight `whatIfWager` request (GameDetail sends
+ *        this when the selected game changes) — no reply is posted.
  */
 
 import {
   playerFrom2Axis,
   calculateWinRate,
   simulateGame,
+  simulateFromState,
   sampleOpponent,
   mulberry32,
+  buildFullBoard,
+  DJ_VALUES,
   type SimConfig,
   type DDStrategy,
   type DDEvent,
+  type SimState,
+  type Player,
   DEFAULT_CONFIG,
 } from './sim-engine';
 import { buildValueTable, type ValueTable } from './value-function';
@@ -162,11 +190,25 @@ let cancelled = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let storedGames: any[] | null = null;
 
+/** Bumped on every `whatIfWager`/`cancelWhatIf` message. A request captures
+ *  the generation it was issued under; if the counter has moved on by the
+ *  time its loop checks, it's been superseded (a newer what-if, or the
+ *  selected game changed) and aborts — its own dedicated cancellation
+ *  channel, independent of the shared `cancelled` flag above so opening a
+ *  what-if never interrupts an unrelated in-flight grid/all-games sweep on
+ *  this same persistent worker. */
+let whatIfGeneration = 0;
+
 self.onmessage = (e: MessageEvent) => {
   const msg = e.data;
 
   if (msg.type === 'cancel') {
     cancelled = true;
+    return;
+  }
+
+  if (msg.type === 'cancelWhatIf') {
+    whatIfGeneration++;
     return;
   }
 
@@ -613,6 +655,58 @@ self.onmessage = (e: MessageEvent) => {
     if (result === null) return; // cancelled mid-computation — mirrors computeGrid's abort-silently semantics
 
     self.postMessage({ type: 'outcomesResult', ...result, requestId });
+  }
+
+  if (msg.type === 'whatIfWager') {
+    // "What if you had wagered differently?" (TASKS.md Phase 1F). Own
+    // cancellation channel (whatIfGeneration) — see its declaration above —
+    // so this never touches the shared `cancelled` flag used by grid/
+    // all-games sweeps also running on this persistent worker.
+    const {
+      requestId,
+      gameIndex,
+      ddEventIndex,
+      you,
+      event,
+      whatIfWagerAmount,
+      n = 2000,
+      seed = DEFAULT_WHAT_IF_SEED,
+    } = msg;
+    const games = storedGames;
+    if (!games || !games[gameIndex]) {
+      self.postMessage({ type: 'error', message: 'Game not found' });
+      return;
+    }
+    const config: SimConfig = msg.config ?? DEFAULT_CONFIG;
+    const game = games[gameIndex];
+    const player = playerFrom2Axis(you.knowledge, you.buzzerSpeed);
+    const opponentProfiles: [OpponentSimProfile, OpponentSimProfile] = [
+      calibrateOpponent(game.o[0]),
+      calibrateOpponent(game.o[1]),
+    ];
+
+    const generation = ++whatIfGeneration;
+    const result = computeWhatIfWager(
+      player,
+      opponentProfiles,
+      event,
+      whatIfWagerAmount,
+      config,
+      n,
+      seed,
+      { isCancelled: () => whatIfGeneration !== generation },
+    );
+    if (result === null) return; // superseded — drop silently
+
+    self.postMessage({
+      type: 'whatIfWagerResult',
+      requestId,
+      gameIndex,
+      ddEventIndex,
+      actualWager: event.wager,
+      whatIfWagerAmount,
+      ...result,
+    });
   }
 };
 
@@ -1075,4 +1169,174 @@ export function computeOutcomes(
     lockAgainstShare: lockAgainstCount / nGames,
     decidedShare: decidedCount / nGames,
   };
+// ─── "What if you had wagered differently?" (TASKS.md Phase 1F) ──────────
+
+/** Default seed for computeWhatIfWager — reproducible across repeat clicks
+ *  of "What if" at the same wager. */
+export const DEFAULT_WHAT_IF_SEED = 0x4A6170;
+
+/** Shape `calibrateOpponent`/`OPPONENT_PROFILES` both satisfy — the only
+ *  fields `sampleOpponent` reads. */
+type OpponentSimProfile = { b: number; p: number; fjAccuracy: number };
+
+/** The recorded Daily Double fields needed to resume play from it —
+ *  exactly `DDEvent`'s optional/additive resume fields (sim-engine.ts) plus
+ *  its always-present `wager`/`correct`. GameDetail hides the what-if
+ *  control entirely when an event lacks `scoresBefore`/`cluesRemainingAfter`
+ *  (older results), so by the time this runs they're known-present. */
+export interface WhatIfWagerEvent {
+  round: 'J' | 'DJ';
+  scoresBefore: [number, number, number];
+  cluesRemainingAfter: number;
+  correct: boolean;
+  /** The wager actually made at this Daily Double. */
+  wager: number;
+}
+
+export interface WhatIfWagerResult {
+  actualWinRate: number;
+  whatIfWinRate: number;
+  /** whatIfWinRate - actualWinRate, in [-1, 1]. */
+  diff: number;
+  /**
+   * Paired standard error of `diff`. Computed from the per-rollout
+   * (whatIf - actual) outcome differences directly (each in {-1, 0, 1}),
+   * not from the two arms' independent binomial SEs added in quadrature —
+   * the paired seeding correlates the two arms, so the naive independent
+   * formula overstates the true uncertainty in the difference.
+   */
+  se: number;
+  n: number;
+}
+
+/** J-round clue face values (sim-engine.ts's own `J_VALUES` is private —
+ *  this is its only consumer here, so it's duplicated rather than exporting
+ *  a new symbol from a file this task must not touch). */
+const J_VALUES_FOR_RESUME = [200, 400, 600, 800, 1000];
+
+/**
+ * Sample a representative remaining board of `n` clue values for `round`,
+ * for resuming a state we only know the CLUE COUNT of (not the actual
+ * values) — same technique as `value-function.ts`'s private
+ * `sampleRemainingBoard` (partial Fisher–Yates over the round's full
+ * 30-clue board), parameterized by round since that function is scoped to
+ * DJ-only states and this caller also resumes mid-J.
+ */
+export function sampleRemainingBoardForRound(round: 'J' | 'DJ', n: number, rng: () => number): number[] {
+  const board = buildFullBoard(round === 'J' ? J_VALUES_FOR_RESUME : DJ_VALUES);
+  const take = Math.max(0, Math.min(n, board.length));
+  for (let i = 0; i < take; i++) {
+    const j = i + Math.floor(rng() * (board.length - i));
+    const tmp = board[i]; board[i] = board[j]; board[j] = tmp;
+  }
+  return board.slice(0, take);
+}
+
+/**
+ * Estimate how many (still-unrevealed) Daily Doubles remain in the round
+ * after the one just resolved. Exact for 'J' (the round has exactly one
+ * DD, and it's the one being resumed from, so none remain). For 'DJ' (2
+ * DDs total, so at most 1 remains), the event alone doesn't say whether
+ * this was the round's first or second DD, so it's estimated from the
+ * fraction of the round still unplayed — the same clue-count-only
+ * treatment `value-function.ts`'s `buildValueTable` gives any state reached
+ * only via a `cluesRemaining` count.
+ */
+export function estimateRemainingDDCount(round: 'J' | 'DJ', cluesRemainingAfter: number): number {
+  if (round === 'J') return 0;
+  const clamped = Math.max(0, Math.min(29, cluesRemainingAfter));
+  return Math.round(clamped / 29);
+}
+
+/**
+ * Pure builder behind the `whatIfWager` message, exported for direct unit
+ * testing. Resumes `event` with the DD outcome already applied — once
+ * under the ACTUAL wager (`event.wager`), once under `whatIfWagerAmount` —
+ * and rolls the rest of the game forward `n` times per arm via
+ * `simulateFromState`.
+ *
+ * Paired seeds (common random numbers, same technique `buildGamesDelta`
+ * above uses): rollout i's two arms both derive their RNG from the SAME
+ * per-rollout seed (`seed` offset by a prime stride, matching
+ * `equity-validation.test.ts`'s `productionEquity`), so they draw the same
+ * sampled remaining board and the same opponent samples/clue outcomes up
+ * until the differing score changes a downstream decision (e.g. who
+ * controls the board next). When `whatIfWagerAmount === event.wager` the
+ * two arms are bit-identical for every rollout, so `diff` and `se` are
+ * both exactly 0.
+ *
+ * Returns `null` if `hooks.isCancelled()` becomes true mid-computation
+ * (checked once per rollout — mirrors `buildDDImpactGrid`'s abort-silently
+ * semantics elsewhere in this file).
+ */
+export function computeWhatIfWager(
+  you: Player,
+  opponentProfiles: [OpponentSimProfile, OpponentSimProfile],
+  event: WhatIfWagerEvent,
+  whatIfWagerAmount: number,
+  config: SimConfig,
+  n = 2000,
+  seed: number = DEFAULT_WHAT_IF_SEED,
+  hooks: { isCancelled?: () => boolean } = {},
+): WhatIfWagerResult | null {
+  const { round, scoresBefore, cluesRemainingAfter, correct, wager } = event;
+
+  const actualScores: [number, number, number] = [...scoresBefore];
+  actualScores[0] += correct ? wager : -wager;
+  const whatIfScores: [number, number, number] = [...scoresBefore];
+  whatIfScores[0] += correct ? whatIfWagerAmount : -whatIfWagerAmount;
+
+  const ddCount = estimateRemainingDDCount(round, cluesRemainingAfter);
+
+  const actualOutcomes = new Int8Array(n);
+  const whatIfOutcomes = new Int8Array(n);
+  let actualWins = 0;
+  let whatIfWins = 0;
+
+  for (let i = 0; i < n; i++) {
+    if (hooks.isCancelled?.()) return null;
+
+    // Prime stride de-correlates rollouts from each other (same scheme as
+    // equity-validation.test.ts's productionEquity); both arms share this
+    // one seed so they're paired.
+    const rollSeed = (seed + i * 7919) >>> 0;
+
+    const rngActual = mulberry32(rollSeed);
+    const remainingActual = sampleRemainingBoardForRound(round, cluesRemainingAfter, rngActual);
+    const opp1a = sampleOpponent(opponentProfiles[0], rngActual);
+    const opp2a = sampleOpponent(opponentProfiles[1], rngActual);
+    const stateActual: SimState = {
+      scores: actualScores, round, remainingClueValues: remainingActual, remainingDDCount: ddCount,
+    };
+    const winActual = simulateFromState(stateActual, [you, opp1a, opp2a], config, rngActual, false).winner === 0 ? 1 : 0;
+    actualOutcomes[i] = winActual;
+    actualWins += winActual;
+
+    const rngWhatIf = mulberry32(rollSeed);
+    const remainingWhatIf = sampleRemainingBoardForRound(round, cluesRemainingAfter, rngWhatIf);
+    const opp1w = sampleOpponent(opponentProfiles[0], rngWhatIf);
+    const opp2w = sampleOpponent(opponentProfiles[1], rngWhatIf);
+    const stateWhatIf: SimState = {
+      scores: whatIfScores, round, remainingClueValues: remainingWhatIf, remainingDDCount: ddCount,
+    };
+    const winWhatIf = simulateFromState(stateWhatIf, [you, opp1w, opp2w], config, rngWhatIf, false).winner === 0 ? 1 : 0;
+    whatIfOutcomes[i] = winWhatIf;
+    whatIfWins += winWhatIf;
+  }
+
+  const actualWinRate = actualWins / n;
+  const whatIfWinRate = whatIfWins / n;
+
+  let sumDiff = 0;
+  let sumDiffSq = 0;
+  for (let i = 0; i < n; i++) {
+    const d = whatIfOutcomes[i] - actualOutcomes[i];
+    sumDiff += d;
+    sumDiffSq += d * d;
+  }
+  const meanDiff = sumDiff / n;
+  const varDiff = Math.max(0, sumDiffSq / n - meanDiff * meanDiff);
+  const se = Math.sqrt(varDiff / n);
+
+  return { actualWinRate, whatIfWinRate, diff: whatIfWinRate - actualWinRate, se, n };
 }

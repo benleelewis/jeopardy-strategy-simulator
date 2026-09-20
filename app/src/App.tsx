@@ -4,7 +4,7 @@ import { ControlsPanel } from './components/ControlsPanel';
 import { StatsPanel } from './components/StatsPanel';
 import { ContributionGraph, type GameData, type ColorMode, type GainData } from './components/ContributionGraph';
 import { GainHeader, type GainTableStatus } from './components/GainHeader';
-import { GameDetail, type SimRun, type DDGameDetail } from './components/GameDetail';
+import { GameDetail, type SimRun, type DDGameDetail, type WhatIfResult } from './components/GameDetail';
 import { GamesControls } from './components/GamesControls';
 import { YourNumber } from './components/YourNumber';
 import { MarginalReturns } from './components/MarginalReturns';
@@ -267,6 +267,16 @@ export default function App() {
   // DD events for the currently selected game (additive to the existing
   // unseeded singleGameResults path above).
   const [ddGameDetail, setDdGameDetail] = useState<DDGameDetail | null>(null);
+  // Phase 1F "What-if replay with different wagers": GameDetail's inline
+  // per-DD-row control. `whatIfPendingIndex` is the ddEvents index currently
+  // awaiting a reply (or null); `whatIfResult` is the most recent reply.
+  // `whatIfRequestIdRef` is bumped on every new request AND whenever the
+  // selected game changes, so a reply for a superseded request (a stale
+  // game, or a second click before the first reply lands) is dropped even
+  // if the worker's own `cancelWhatIf` message loses the race.
+  const [whatIfPendingIndex, setWhatIfPendingIndex] = useState<number | null>(null);
+  const [whatIfResult, setWhatIfResult] = useState<WhatIfResult | null>(null);
+  const whatIfRequestIdRef = useRef(0);
   // TODOS "P2 — All Games optimal-vs-actual delta coloring": second colour
   // mode. 'winRate' (default) leaves every existing path untouched; 'gain'
   // additionally runs the paired computeGamesDelta sweep below.
@@ -430,6 +440,23 @@ export default function App() {
         setSingleGameResults(msg.results);
       } else if (msg.type === 'simulateGameDetailResult') {
         setDdGameDetail({ gameIndex: msg.gameIndex, ddEvents: msg.ddEvents, you: msg.you });
+      } else if (msg.type === 'whatIfWagerResult') {
+        // Phase 1F what-if replay: drop a reply for a request that's been
+        // superseded (a newer what-if click, or the selected game changed
+        // since it was sent) — mirrors the stale-result guards already used
+        // for ddGameDetail/singleGameResults above.
+        if (msg.requestId !== whatIfRequestIdRef.current) return;
+        setWhatIfPendingIndex(null);
+        setWhatIfResult({
+          gameIndex: msg.gameIndex,
+          ddEventIndex: msg.ddEventIndex,
+          actualWager: msg.actualWager,
+          whatIfWagerAmount: msg.whatIfWagerAmount,
+          actualWinRate: msg.actualWinRate,
+          whatIfWinRate: msg.whatIfWinRate,
+          diff: msg.diff,
+          se: msg.se,
+        });
       } else if (msg.type === 'simAllGamesProgress') {
         setGameSimProgress(msg.pct);
       } else if (msg.type === 'simAllGamesResult') {
@@ -791,10 +818,17 @@ export default function App() {
     setSelectedGame(index);
     setSingleGameResults(null); // clear previous results
     setDdGameDetail(null); // clear previous DD events (TODOS item)
+    // Phase 1F: cancel any in-flight what-if and drop its stale result —
+    // bumping the request id makes a late whatIfWagerResult reply a no-op
+    // even if the worker's cancelWhatIf message itself loses the race.
+    whatIfRequestIdRef.current++;
+    setWhatIfPendingIndex(null);
+    setWhatIfResult(null);
 
     // Run single-game detail sim
     const worker = gameWorkerRef.current;
     if (worker && gamesLoadedInWorker.current) {
+      worker.postMessage({ type: 'cancelWhatIf' });
       worker.postMessage({
         type: 'simSingleGameDetail',
         gameIndex: index,
@@ -822,6 +856,43 @@ export default function App() {
       });
     }
   }, [xAxis, yAxis, xVal, yVal, pinnedValues, config]);
+
+  // Phase 1F "What-if replay with different wagers": builds the `whatIfWager`
+  // message from the currently selected game's already-fetched DD detail
+  // (ddGameDetail) — the event's resume fields, plus the "you" skill the
+  // worker used to produce it, so the resumed rollout matches the game the
+  // row is showing. No-ops if the game/DD detail have gone stale (a fast
+  // re-click racing a game switch) or the event lacks resume fields —
+  // GameDetail already hides the control in that case, but this guard keeps
+  // the handler safe to call regardless.
+  const handleWhatIfWager = useCallback((ddEventIndex: number, whatIfWagerAmount: number) => {
+    const worker = gameWorkerRef.current;
+    if (!worker || !gamesLoadedInWorker.current) return;
+    if (selectedGame === null || !ddGameDetail || ddGameDetail.gameIndex !== selectedGame) return;
+    const ev = ddGameDetail.ddEvents[ddEventIndex];
+    if (!ev || ev.scoresBefore === undefined || ev.cluesRemainingAfter === undefined) return;
+
+    const requestId = ++whatIfRequestIdRef.current;
+    setWhatIfPendingIndex(ddEventIndex);
+    setWhatIfResult(null);
+
+    worker.postMessage({
+      type: 'whatIfWager',
+      requestId,
+      gameIndex: selectedGame,
+      ddEventIndex,
+      you: ddGameDetail.you,
+      event: {
+        round: ev.round,
+        scoresBefore: ev.scoresBefore,
+        cluesRemainingAfter: ev.cluesRemainingAfter,
+        correct: ev.correct,
+        wager: ev.wager,
+      },
+      whatIfWagerAmount,
+      config,
+    });
+  }, [selectedGame, ddGameDetail, config]);
 
   const handleGameEstimate = useCallback((estimate: GameEstimate) => {
     // Map the game entry onto whichever axes are active (P-1: each preset
@@ -1125,6 +1196,9 @@ export default function App() {
                         simResults={singleGameResults}
                         ddDetail={ddGameDetail}
                         valueTable={cachedValueTable}
+                        onWhatIfWager={handleWhatIfWager}
+                        whatIfPendingIndex={whatIfPendingIndex}
+                        whatIfResult={whatIfResult}
                       />
                     </div>
                   )}
