@@ -103,6 +103,9 @@ describe('GET /api/jarchive', () => {
     expect(res.headers['Cache-Control']).toBe('public, s-maxage=86400');
 
     const body = res.body as JArchiveGameResponse;
+    // The requested id, not the parser's scrape of the page's first
+    // game_id= link (that is the previous-game nav link, one lower).
+    expect(body.gameId).toBe(9501);
     expect(body.players).toEqual(['Sam', 'Grace', 'Joey']);
     expect(body.validation.mismatches).toEqual([]);
     expect(body.contestants).toHaveLength(3);

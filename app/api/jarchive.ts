@@ -29,7 +29,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import { parseGame, replay, playerStats, type JArchiveGameResponse } from '../src/lib/jarchive';
+import { parseGame, replay, playerStats, type JArchiveGameResponse } from '../src/lib/jarchive.js';
 
 interface VercelLikeRequest extends IncomingMessage {
   query: Record<string, string | string[] | undefined>;
@@ -112,7 +112,10 @@ export default async function handler(req: VercelLikeRequest, res: VercelLikeRes
     });
 
   const body: JArchiveGameResponse = {
-    gameId: game.gameId ?? gameId,
+    // The id we fetched, not the one the parser scraped: the first
+    // `game_id=` link on a showgame page is the previous-game nav link, so
+    // game.gameId reads one lower than the page it came from.
+    gameId,
     title: game.title,
     players: game.players,
     fullNames: game.fullNames,
