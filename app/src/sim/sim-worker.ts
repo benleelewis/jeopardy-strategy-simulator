@@ -49,7 +49,7 @@
  *        (ddStrategy 'equity' + squareSelection 'ddSeek', everything else
  *        as set). Never sent in the default colour mode.
  *   OUT: { type: 'gamesDeltaProgress', pct, requestId }
- *   OUT: { type: 'gamesDeltaResult', results: { current, optimal }[],
+ *   OUT: { type: 'gamesDeltaResult', results: { actual, optimal }[],
  *          _simsPerGame, requestId }
  */
 
@@ -102,7 +102,7 @@ const DEFAULT_GAMES_DELTA_SEED = 0x6A1AED;
  *  All Games graph is `optimal - current`; the headline uses both means. */
 export interface GameDeltaResult {
   /** Win rate with the settings as currently set. */
-  current: number;
+  actual: number;
   /** Win rate with optimal strategy: ddStrategy 'equity' (+ V-table) and
    *  squareSelection 'ddSeek', everything else as set. */
   optimal: number;
@@ -678,7 +678,7 @@ export function buildGamesDelta(
     const game = games[gi];
     const opp1Profile = calibrateOpponent(game.o[0]);
     const opp2Profile = calibrateOpponent(game.o[1]);
-    let winsCurrent = 0;
+    let winsActual = 0;
     let winsOptimal = 0;
 
     for (let s = 0; s < simsPerGame; s++) {
@@ -687,7 +687,7 @@ export function buildGamesDelta(
       const rngCurrent = mulberry32(simSeed);
       const c1 = sampleOpponent(opp1Profile, rngCurrent);
       const c2 = sampleOpponent(opp2Profile, rngCurrent);
-      if (simulateGame(player, c1, c2, currentConfig, false, rngCurrent).winner === 0) winsCurrent++;
+      if (simulateGame(player, c1, c2, currentConfig, false, rngCurrent).winner === 0) winsActual++;
 
       const rngOptimal = mulberry32(simSeed);
       const o1 = sampleOpponent(opp1Profile, rngOptimal);
@@ -695,7 +695,7 @@ export function buildGamesDelta(
       if (simulateGame(player, o1, o2, optimalConfig, false, rngOptimal).winner === 0) winsOptimal++;
     }
 
-    results.push({ current: winsCurrent / simsPerGame, optimal: winsOptimal / simsPerGame });
+    results.push({ actual: winsActual / simsPerGame, optimal: winsOptimal / simsPerGame });
 
     if (gi % progressInterval === 0) {
       hooks.onProgress?.(gi / totalGames);

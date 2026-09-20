@@ -115,7 +115,7 @@ describe('buildGamesDelta — All Games "Gain from optimal play" (TODOS P2 optim
     expect(results).not.toBeNull();
     expect(results!.length).toBe(games.length);
     for (const r of results!) {
-      expect(r.optimal - r.current).toBe(0);
+      expect(r.optimal - r.actual).toBe(0);
     }
   });
 
@@ -132,7 +132,7 @@ describe('buildGamesDelta — All Games "Gain from optimal play" (TODOS P2 optim
     const config: SimConfig = { ...DEFAULT_CONFIG, ddStrategy: 'conservative' };
     const results = buildGamesDelta(games, 'knowledge', 'buzzerSpeed', 0.5, 0.5, {}, config, 40, table, 0x1234);
     expect(results).not.toBeNull();
-    expect(results!.some(r => r.optimal !== r.current)).toBe(true);
+    expect(results!.some(r => r.optimal !== r.actual)).toBe(true);
   });
 
   it('returns null when cancelled mid-computation', () => {
