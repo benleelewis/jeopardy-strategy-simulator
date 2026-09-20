@@ -1,13 +1,15 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import type { GameData } from './ContributionGraph';
 import { calibrateOpponent } from '../sim/calibrate';
 import type { DDEvent } from '../sim/sim-engine';
 import { equityWager, type ValueTable, type EquityWagerYou } from '../sim/value-function';
+import { GameReplay } from './GameReplay';
 
 export interface SimRun {
   scores: [number, number, number];
   winner: number;
   history?: [number, number, number][];
+  ddEvents?: DDEvent[];
 }
 
 /**
@@ -126,6 +128,21 @@ export function GameDetail({ game, index, winRate, onClose, simResults, ddDetail
   // async on click; a fast re-click before the previous result lands must
   // not show the wrong game's DD events.
   const ddForThisGame = ddDetail && ddDetail.gameIndex === index ? ddDetail : null;
+  // Phase 1D: "Watch this game" replays the first of the already-run
+  // simulations (it already carries full history + ddEvents — see
+  // sim-worker.ts's simSingleGameDetail handler). Closing over a different
+  // game resets this — via React's "adjust state during render" pattern
+  // (not an effect) so an in-flight replay never survives a game switch and
+  // GameReplay's own unmount cleanup runs before the new game's content
+  // paints.
+  const [watching, setWatching] = useState(false);
+  const [watchingForIndex, setWatchingForIndex] = useState(index);
+  if (watchingForIndex !== index) {
+    setWatchingForIndex(index);
+    setWatching(false);
+  }
+  const replayRun = simResults?.[0] ?? null;
+  const playerNames: [string, string, string] = ['You', game.o[0].n, game.o[1].n];
 
   return (
     <div style={{
@@ -215,14 +232,32 @@ export function GameDetail({ game, index, winRate, onClose, simResults, ddDetail
           <div style={{ fontSize: 12, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
             Simulations
           </div>
-          <div style={{
-            fontSize: 13,
-            fontWeight: 700,
-            color: (simResults ? wins / total : (winRate ?? 0)) > 0.5 ? 'var(--cg-5, #f5d442)'
-              : (simResults ? wins / total : (winRate ?? 0)) > 0.33 ? 'var(--cg-4, #c5a028)'
-              : 'var(--cg-3, #1a3ba8)',
-          }}>
-            {simResults ? `Won ${wins}/${total}` : winRate !== undefined ? `${Math.round(winRate * 100)}%` : '...'}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {replayRun && !watching && (
+              <button
+                onClick={() => setWatching(true)}
+                style={{
+                  background: 'none',
+                  border: '1px solid var(--border)',
+                  color: 'var(--accent, var(--text-h))',
+                  borderRadius: 4,
+                  padding: '3px 8px',
+                  fontSize: 11,
+                  cursor: 'pointer',
+                }}
+              >
+                Watch this game
+              </button>
+            )}
+            <div style={{
+              fontSize: 13,
+              fontWeight: 700,
+              color: (simResults ? wins / total : (winRate ?? 0)) > 0.5 ? 'var(--cg-5, #f5d442)'
+                : (simResults ? wins / total : (winRate ?? 0)) > 0.33 ? 'var(--cg-4, #c5a028)'
+                : 'var(--cg-3, #1a3ba8)',
+            }}>
+              {simResults ? `Won ${wins}/${total}` : winRate !== undefined ? `${Math.round(winRate * 100)}%` : '...'}
+            </div>
           </div>
         </div>
 
@@ -297,6 +332,9 @@ export function GameDetail({ game, index, winRate, onClose, simResults, ddDetail
         </div>
         <DailyDoubles game={game} ddDetail={ddForThisGame} valueTable={valueTable} dollars={dollars} />
       </div>
+      {watching && replayRun && (
+        <GameReplay run={replayRun} playerNames={playerNames} onClose={() => setWatching(false)} />
+      )}
     </div>
   );
 }
