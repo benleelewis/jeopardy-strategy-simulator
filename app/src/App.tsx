@@ -7,6 +7,7 @@ import { GameDetail, type SimRun, type DDGameDetail } from './components/GameDet
 import { GamesControls } from './components/GamesControls';
 import { YourNumber } from './components/YourNumber';
 import { MarginalReturns } from './components/MarginalReturns';
+import { StrategyOracle } from './components/StrategyOracle';
 import { DDHeatStrip } from './components/DDHeatStrip';
 import { GameAnalyzer, type GameEstimate } from './components/GameAnalyzer';
 import { DEFAULT_CONFIG, type DDStrategy, type SimConfig } from './sim/sim-engine';
@@ -824,6 +825,20 @@ export default function App() {
                     position={position}
                     pinnedValues={pinnedValues}
                     config={config}
+                  />
+                </div>
+                {/* TODOS "P3 — Strategy-oracle full ranking": one realistic
+                    step per knob, ranked by win-rate change at this position.
+                    Own worker (computeOracle), budget scales with the refined
+                    games-per-cell. */}
+                <div style={{ padding: '0 16px 12px' }}>
+                  <StrategyOracle
+                    xAxis={xAxis}
+                    yAxis={yAxis}
+                    position={position}
+                    pinnedValues={pinnedValues}
+                    config={config}
+                    gamesPerCell={REFINED_GAMES_PER_CELL[refinedSpeed]}
                   />
                 </div>
                 {/* E-7 DD heat strip: independent of V — driven entirely by

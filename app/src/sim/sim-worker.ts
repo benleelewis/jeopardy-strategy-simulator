@@ -39,6 +39,15 @@
  *        winRate(current DD strategy) - winRate(DD strategy 'off'), both
  *        run with the SAME seed/gamesPerCell so the difference isolates
  *        the DD-strategy effect rather than independent Monte Carlo noise)
+ *
+ *   IN:  { type: 'computeOracle', xAxis, yAxis, xVal, yVal, pinnedValues,
+ *          config, gamesPerCell, seed? }
+ *        Strategy oracle (TODOS "P3 — Strategy-oracle full ranking"): moves
+ *        every active knob by one realistic step (sim/oracle.ts) and ranks
+ *        the win-rate changes. Shares ORACLE_ESTIMATE_BUDGET × gamesPerCell
+ *        games across all probes, every probe seeded identically.
+ *   OUT: { type: 'oracleProgress', pct }
+ *   OUT: { type: 'oracleResult', rows, baselineWinRate, gamesPerEstimate }
  */
 
 import {
@@ -54,6 +63,14 @@ import {
 import { buildValueTable } from './value-function';
 import { DIMENSIONS, buildSimParams, type DimensionName } from './dimensions';
 import { calibrateOpponent } from './calibrate';
+import {
+  buildOraclePlan,
+  assembleOracleRows,
+  oracleGamesPerEstimate,
+  type OracleInput,
+  type OracleEstimate,
+  type OracleResult,
+} from './oracle';
 
 export interface GridCell {
   /** Normalized X-axis value [0,1] */
@@ -81,6 +98,10 @@ export interface DDImpactCell {
 /** Default seed for computeDDImpactGrid when the caller doesn't pass one —
  *  keeps the overlay reproducible across repeat toggles at the same knobs. */
 const DEFAULT_DD_IMPACT_SEED = 0xD1F5eed;
+
+/** Default seed for computeOracle — one seed shared by every probe so the
+ *  ranking is reproducible and probe differences isolate the knob moved. */
+const DEFAULT_ORACLE_SEED = 0x0AC1E;
 
 let cancelled = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -235,6 +256,41 @@ self.onmessage = (e: MessageEvent) => {
     if (diffGrid === null) return; // cancelled mid-computation — mirrors computeGrid's abort-silently semantics
 
     self.postMessage({ type: 'ddImpactGridResult', grid: diffGrid });
+  }
+
+  if (msg.type === 'computeOracle') {
+    const {
+      xAxis = 'knowledge',
+      yAxis = 'buzzerSpeed',
+      xVal,
+      yVal,
+      pinnedValues = {},
+      gamesPerCell = 450,
+      seed = DEFAULT_ORACLE_SEED,
+    } = msg;
+    const config = msg.config ?? DEFAULT_CONFIG;
+
+    if (!DIMENSIONS[xAxis as DimensionName]) {
+      self.postMessage({ type: 'error', message: `Unknown dimension: ${xAxis}` });
+      return;
+    }
+    if (!DIMENSIONS[yAxis as DimensionName]) {
+      self.postMessage({ type: 'error', message: `Unknown dimension: ${yAxis}` });
+      return;
+    }
+
+    const result = computeOracle(
+      { xAxis: xAxis as DimensionName, yAxis: yAxis as DimensionName, xVal, yVal, pinnedValues, config },
+      gamesPerCell,
+      seed,
+      {
+        onProgress: (pct) => self.postMessage({ type: 'oracleProgress', pct }),
+        isCancelled: () => cancelled,
+      },
+    );
+    if (result === null) return; // cancelled — drop silently, like computeGrid
+
+    self.postMessage({ type: 'oracleResult', ...result });
   }
 
   if (msg.type === 'simAllGames') {
@@ -544,4 +600,87 @@ export function buildDDImpactGrid(
   }
 
   return diffGrid;
+}
+
+/**
+ * Strategy oracle (TODOS "P3 — Strategy-oracle full ranking") — pure
+ * builder, exported for direct unit testing like `buildDDImpactGrid` above;
+ * the `computeOracle` message handler is a thin wrapper that adds progress
+ * and cancellation.
+ *
+ * `sim/oracle.ts` decides WHICH probes to run (one realistic step per knob)
+ * and how to rank them; this function only resolves each probe's
+ * (axes, pinned, config) into engine params exactly the way `computeGrid`
+ * resolves a cell — `buildSimParams` + `resolveDDStrategy` — and runs it.
+ * Every probe plays the same seeded games (common random numbers: game i
+ * of every probe is seeded identically, so the pairing is exact even
+ * though a knob change alters how many draws a game consumes): a probe
+ * equal to the baseline reproduces it exactly, and a probe that differs in
+ * one knob differs from the baseline only through that knob's effect. The
+ * per-game wins are kept so oracle.ts can report the paired standard error.
+ *
+ * Returns `null` if `hooks.isCancelled()` becomes true mid-computation.
+ */
+export function computeOracle(
+  input: OracleInput,
+  gamesPerCell: number,
+  seed: number = DEFAULT_ORACLE_SEED,
+  hooks: { onProgress?: (pct: number) => void; isCancelled?: () => boolean } = {},
+): OracleResult | null {
+  const plan = buildOraclePlan(input);
+  const games = oracleGamesPerEstimate(plan.probes.length, gamesPerCell);
+  const estimates: Record<string, OracleEstimate> = {};
+
+  for (let i = 0; i < plan.probes.length; i++) {
+    if (hooks.isCancelled?.()) return null;
+    const probe = plan.probes[i];
+
+    const { player, config: cellConfig, opponentProfile } = buildSimParams(
+      input.xAxis,
+      input.yAxis,
+      probe.xVal,
+      probe.yVal,
+      { ...probe.pinnedValues, ...configToPinned(probe.config) },
+    );
+    // `buildSimParams` builds its per-cell config on top of DEFAULT_CONFIG,
+    // and `resolveDDStrategy` spreads that per-cell config last — so
+    // DEFAULT_CONFIG's `includeFJ: true` would silently override the
+    // probe's Final Jeopardy setting. Re-apply it so the FJ row (and an
+    // app-level FJ-off baseline) is honest.
+    const mergedConfig: SimConfig = {
+      ...resolveDDStrategy(probe.config, cellConfig, input.xAxis, input.yAxis),
+      includeFJ: probe.config.includeFJ,
+    };
+
+    // Same loop as calculateWinRate, but re-seeded per game (golden-ratio
+    // stride keeps neighbouring game seeds far apart in mulberry32's state
+    // space) so game g is paired across probes. trackHistory=true so each
+    // game's ddEvents are available: the square-selection "why" line
+    // reports how many Daily Doubles YOU found.
+    const wins = new Uint8Array(games);
+    let winCount = 0;
+    let ddsFound = 0;
+    for (let g = 0; g < games; g++) {
+      const rng = mulberry32((seed + Math.imul(g, 0x9E3779B9)) >>> 0);
+      const opp1 = sampleOpponent(opponentProfile, rng);
+      const opp2 = sampleOpponent(opponentProfile, rng);
+      const result = simulateGame(player, opp1, opp2, mergedConfig, true, rng);
+      if (result.winner === 0) {
+        wins[g] = 1;
+        winCount++;
+      }
+      for (const event of result.ddEvents ?? []) {
+        if (event.player === 0) ddsFound++;
+      }
+    }
+    estimates[probe.id] = { winRate: winCount / games, games, ddsFoundPerGame: ddsFound / games, wins };
+
+    hooks.onProgress?.((i + 1) / plan.probes.length);
+  }
+
+  return {
+    rows: assembleOracleRows(plan, estimates),
+    baselineWinRate: estimates.baseline.winRate,
+    gamesPerEstimate: games,
+  };
 }
