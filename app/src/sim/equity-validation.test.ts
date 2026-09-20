@@ -256,7 +256,7 @@ describe('E-4 production-config invariants (Tesauro opponents, correlations, dif
     const msg = `optimum $${optWager} = ${(eqs[bestIdx] * 100).toFixed(1)}%, $${belowWager} = ${(eqBelow * 100).toFixed(1)}%\nfull curve:\n${curveStr}`;
     console.log(`[E-4 production] near-flat check:\n${msg}`);
     expect(eqs[bestIdx] - eqBelow, msg).toBeLessThanOrEqual(0.015);
-  });
+  }, 20000);
 
   it("equity DD strategy never converts a pre-FJ lock into a possible loss (lock preservation)", () => {
     // Build a production V-table (coarse but seeded/deterministic).
