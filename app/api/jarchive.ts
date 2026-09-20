@@ -29,7 +29,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import { parseGame, replay, playerStats, type JArchiveGameResponse } from '../src/lib/jarchive.js';
+import { parseGame, replay, playerStats, gameRecord, type JArchiveGameResponse } from '../src/lib/jarchive.js';
 
 interface VercelLikeRequest extends IncomingMessage {
   query: Record<string, string | string[] | undefined>;
@@ -122,6 +122,7 @@ export default async function handler(req: VercelLikeRequest, res: VercelLikeRes
     validation: rep.validation,
     contestants,
     dailyDoubles,
+    record: gameRecord(game),
   };
 
   res.setHeader('Cache-Control', 'public, s-maxage=86400');
