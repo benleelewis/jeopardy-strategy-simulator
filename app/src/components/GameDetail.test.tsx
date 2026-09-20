@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
-import { GameDetail, type DDGameDetail, type SimRun } from './GameDetail';
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, within, fireEvent } from '@testing-library/react';
+import { GameDetail, type DDGameDetail, type SimRun, type WhatIfResult } from './GameDetail';
 import type { GameData } from './ContributionGraph';
 import type { ValueTable, ValueTableDims } from '../sim/value-function';
 
@@ -213,5 +213,157 @@ describe('GameDetail — Daily Doubles section (TODOS "P2 — GameDetail DD even
 
     expect(screen.getByText('Simulating...')).toBeInTheDocument();
     expect(screen.queryByRole('row')).not.toBeInTheDocument();
+  });
+});
+
+describe('GameDetail — "What if you had wagered differently?" (TASKS.md Phase 1F)', () => {
+  it('shows the what-if control only on a "you" row with the resume fields present', () => {
+    render(
+      <GameDetail
+        game={game}
+        index={0}
+        winRate={0.4}
+        onClose={() => {}}
+        simResults={simResultsFixture}
+        ddDetail={ddDetail}
+        valueTable={constantValueTable}
+      />,
+    );
+
+    const rows = screen.getAllByRole('row');
+    const yourRow = rows[1];
+    const oppRow = rows[2];
+
+    expect(within(yourRow).getByRole('button', { name: 'What if' })).toBeInTheDocument();
+    expect(within(oppRow).queryByRole('button', { name: 'What if' })).not.toBeInTheDocument();
+  });
+
+  it('hides the control when the event lacks scoresBefore/cluesRemainingAfter (older results)', () => {
+    const oldDetail: DDGameDetail = {
+      gameIndex: 0,
+      you: { knowledge: 0.5, buzzerSpeed: 0.5 },
+      ddEvents: [
+        { ...ddDetail.ddEvents[0], scoresBefore: undefined, cluesRemainingAfter: undefined },
+      ],
+    };
+    render(
+      <GameDetail
+        game={game}
+        index={0}
+        winRate={0.4}
+        onClose={() => {}}
+        simResults={simResultsFixture}
+        ddDetail={oldDetail}
+        valueTable={constantValueTable}
+      />,
+    );
+
+    const rows = screen.getAllByRole('row');
+    expect(within(rows[1]).queryByRole('button', { name: 'What if' })).not.toBeInTheDocument();
+  });
+
+  it('clicking "What if" reports the row index and the typed wager to the caller', () => {
+    const onWhatIfWager = vi.fn();
+    render(
+      <GameDetail
+        game={game}
+        index={0}
+        winRate={0.4}
+        onClose={() => {}}
+        simResults={simResultsFixture}
+        ddDetail={ddDetail}
+        valueTable={constantValueTable}
+        onWhatIfWager={onWhatIfWager}
+      />,
+    );
+
+    const input = screen.getByLabelText('What-if wager for Daily Double 0') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '6000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'What if' }));
+
+    expect(onWhatIfWager).toHaveBeenCalledWith(0, 6000);
+  });
+
+  it('clamps a typed wager above the real-rules max (max(score, clue value)) before reporting it', () => {
+    const onWhatIfWager = vi.fn();
+    render(
+      <GameDetail
+        game={game}
+        index={0}
+        winRate={0.4}
+        onClose={() => {}}
+        simResults={simResultsFixture}
+        ddDetail={ddDetail}
+        valueTable={constantValueTable}
+        onWhatIfWager={onWhatIfWager}
+      />,
+    );
+
+    // event 0: scoreBefore $6,000, clueValue $1,600 → real-rules max is $6,000.
+    const input = screen.getByLabelText('What-if wager for Daily Double 0');
+    fireEvent.change(input, { target: { value: '999999' } });
+    fireEvent.click(screen.getByRole('button', { name: 'What if' }));
+
+    expect(onWhatIfWager).toHaveBeenCalledWith(0, 6000);
+  });
+
+  it('renders the result line from a fixture whatIfWager message, with the equity-optimal note', () => {
+    const whatIfResult: WhatIfResult = {
+      gameIndex: 0,
+      ddEventIndex: 0,
+      actualWager: 5000,
+      whatIfWagerAmount: 5,
+      actualWinRate: 0.41,
+      whatIfWinRate: 0.47,
+      diff: 0.06,
+      se: 0.02,
+    };
+    render(
+      <GameDetail
+        game={game}
+        index={0}
+        winRate={0.4}
+        onClose={() => {}}
+        simResults={simResultsFixture}
+        ddDetail={ddDetail}
+        valueTable={constantValueTable}
+        whatIfResult={whatIfResult}
+      />,
+    );
+
+    // Constant-table optimal wager is always the $5 floor (see doc above);
+    // the fixture's whatIfWagerAmount ($5) matches it, so the equity-optimal
+    // note should render alongside the win-chance line.
+    expect(
+      screen.getByText(/Win chance: 41% with your \$5,000 → 47% with \$5/),
+    ).toBeInTheDocument();
+    expect(screen.getByText('This is the equity-optimal wager for this state.')).toBeInTheDocument();
+  });
+
+  it('does not render a stale result for a different game', () => {
+    const whatIfResult: WhatIfResult = {
+      gameIndex: 1, // a different game than the one being rendered (index 0)
+      ddEventIndex: 0,
+      actualWager: 5000,
+      whatIfWagerAmount: 6000,
+      actualWinRate: 0.41,
+      whatIfWinRate: 0.47,
+      diff: 0.06,
+      se: 0.02,
+    };
+    render(
+      <GameDetail
+        game={game}
+        index={0}
+        winRate={0.4}
+        onClose={() => {}}
+        simResults={simResultsFixture}
+        ddDetail={ddDetail}
+        valueTable={constantValueTable}
+        whatIfResult={whatIfResult}
+      />,
+    );
+
+    expect(screen.queryByText(/Win chance:/)).not.toBeInTheDocument();
   });
 });

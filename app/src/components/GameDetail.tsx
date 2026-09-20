@@ -5,6 +5,26 @@ import type { DDEvent } from '../sim/sim-engine';
 import { equityWager, type ValueTable, type EquityWagerYou } from '../sim/value-function';
 import { GameReplay } from './GameReplay';
 
+/**
+ * "What if you had wagered differently?" (TASKS.md Phase 1F) — one
+ * `whatIfWager` worker reply, shaped for direct render. `ddEventIndex` ties
+ * it back to the row it was requested from (see `WhatIfRow` below); a
+ * mismatched `gameIndex` (a reply arriving after the selected game changed)
+ * is the caller's (App.tsx's) responsibility to have already dropped.
+ */
+export interface WhatIfResult {
+  gameIndex: number;
+  ddEventIndex: number;
+  actualWager: number;
+  whatIfWagerAmount: number;
+  actualWinRate: number;
+  whatIfWinRate: number;
+  /** whatIfWinRate - actualWinRate, in [-1, 1]. */
+  diff: number;
+  /** Paired standard error of `diff`, in the same [0, 1] units. */
+  se: number;
+}
+
 export interface SimRun {
   scores: [number, number, number];
   winner: number;
@@ -38,6 +58,23 @@ interface Props {
    *  (see App.tsx's `cachedValueTable`). Undefined ⇒ the equity-optimal
    *  column shows a build-it-first hint instead of blocking. */
   valueTable?: ValueTable;
+  /**
+   * "What if you had wagered differently?" (Phase 1F). Fired when the user
+   * clicks "What if" on a "you" Daily Double row — `ddEventIndex` is this
+   * row's index into `ddDetail.ddEvents`. The caller (App.tsx) owns the
+   * worker and builds the full `whatIfWager` message from its own closure
+   * (axes/config/opponent profiles); this component only reports the row
+   * and the typed wager.
+   */
+  onWhatIfWager?: (ddEventIndex: number, whatIfWagerAmount: number) => void;
+  /** `ddEventIndex` of the row currently awaiting a `whatIfWager` reply, or
+   *  null/undefined. The caller clears this when the reply lands or the
+   *  request is superseded (e.g. the selected game changed). */
+  whatIfPendingIndex?: number | null;
+  /** Most recent `whatIfWager` reply to render, already filtered by the
+   *  caller to this game (a stale reply for a previous game must never
+   *  reach this prop). */
+  whatIfResult?: WhatIfResult | null;
 }
 
 const sectionStyle: React.CSSProperties = {
@@ -116,7 +153,10 @@ function ScoreChart({ history, winner }: { history: [number, number, number][]; 
   return <canvas ref={canvasRef} style={{ display: 'block' }} />;
 }
 
-export function GameDetail({ game, index, winRate, onClose, simResults, ddDetail, valueTable }: Props) {
+export function GameDetail({
+  game, index, winRate, onClose, simResults, ddDetail, valueTable,
+  onWhatIfWager, whatIfPendingIndex, whatIfResult,
+}: Props) {
   const pct = (v: number) => `${Math.round(v * 100)}%`;
   const dollars = (v: number) => `$${Math.max(0, v).toLocaleString()}`;
 
@@ -330,7 +370,15 @@ export function GameDetail({ game, index, winRate, onClose, simResults, ddDetail
         <div style={{ fontSize: 12, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>
           Daily Doubles
         </div>
-        <DailyDoubles game={game} ddDetail={ddForThisGame} valueTable={valueTable} dollars={dollars} />
+        <DailyDoubles
+          game={game}
+          ddDetail={ddForThisGame}
+          valueTable={valueTable}
+          dollars={dollars}
+          onWhatIfWager={onWhatIfWager}
+          whatIfPendingIndex={ddForThisGame ? whatIfPendingIndex : null}
+          whatIfResult={ddForThisGame && whatIfResult?.gameIndex === ddForThisGame.gameIndex ? whatIfResult : null}
+        />
       </div>
       {watching && replayRun && (
         <GameReplay run={replayRun} playerNames={playerNames} onClose={() => setWatching(false)} />
@@ -346,12 +394,15 @@ export function GameDetail({ game, index, winRate, onClose, simResults, ddDetail
  * function (`equityWager`) at that DD's recorded score-state.
  */
 function DailyDoubles({
-  game, ddDetail, valueTable, dollars,
+  game, ddDetail, valueTable, dollars, onWhatIfWager, whatIfPendingIndex, whatIfResult,
 }: {
   game: GameData;
   ddDetail: DDGameDetail | null;
   valueTable: ValueTable | undefined;
   dollars: (v: number) => string;
+  onWhatIfWager?: (ddEventIndex: number, whatIfWagerAmount: number) => void;
+  whatIfPendingIndex?: number | null;
+  whatIfResult?: WhatIfResult | null;
 }) {
   if (!ddDetail) {
     return (
@@ -383,6 +434,7 @@ function DailyDoubles({
           <th style={thStyle}>Result</th>
           <th style={thStyle}>After</th>
           <th style={thStyle}>Equity-optimal wager</th>
+          <th style={thStyle}>What if?</th>
         </tr>
       </thead>
       <tbody>
@@ -393,6 +445,7 @@ function DailyDoubles({
 
           let equityCell: React.ReactNode = '—';
           let diffCopy: string | null = null;
+          let optimalWager: number | null = null;
 
           if (isYou) {
             if (!valueTable) {
@@ -402,7 +455,7 @@ function DailyDoubles({
                 </span>
               );
             } else if (ev.scoresBefore !== undefined && ev.cluesRemainingAfter !== undefined && ev.adjustedP !== undefined) {
-              const optimalWager = equityWager(
+              optimalWager = equityWager(
                 ddDetail.you, ev.scoresBefore, ev.cluesRemainingAfter, ev.adjustedP, valueTable,
               );
               equityCell = dollars(optimalWager);
@@ -413,8 +466,20 @@ function DailyDoubles({
             }
           }
 
+          // What-if replay (Phase 1F) needs the same resume fields the
+          // equity-optimal recompute above needs — additive/optional on
+          // DDEvent, so an older seeded result missing them just hides the
+          // control for that row rather than resuming from a guess.
+          const canWhatIf = isYou && ev.scoresBefore !== undefined && ev.cluesRemainingAfter !== undefined;
+
+          // Keyed by (gameIndex, i) rather than just `i` so switching to a
+          // different game — which reuses the same row indices — remounts
+          // WhatIfRow's local wager-input state instead of carrying over the
+          // previous game's typed value.
+          const rowKey = `${ddDetail.gameIndex}-${i}`;
+
           return (
-            <tr key={i} style={{
+            <tr key={rowKey} style={{
               borderBottom: rowBorder,
               color: isYou ? 'var(--text-h)' : 'var(--text-muted)',
               fontWeight: isYou ? 600 : 400,
@@ -440,11 +505,110 @@ function DailyDoubles({
                   </div>
                 )}
               </td>
+              <td style={{ ...tdStyle, fontFamily: 'sans-serif', fontSize: 11, minWidth: 160 }}>
+                {canWhatIf ? (
+                  <WhatIfRow
+                    ddEventIndex={i}
+                    event={ev}
+                    optimalWager={optimalWager}
+                    pending={whatIfPendingIndex === i}
+                    result={whatIfResult && whatIfResult.ddEventIndex === i ? whatIfResult : null}
+                    onWhatIfWager={onWhatIfWager}
+                    dollars={dollars}
+                  />
+                ) : null}
+              </td>
             </tr>
           );
         })}
       </tbody>
     </table>
+  );
+}
+
+/**
+ * "What if you had wagered differently?" (TASKS.md Phase 1F). Inline
+ * control on a "you" Daily Double row: a wager input (defaulting to the
+ * wager actually made, clamped to the real-rules range) and a "What if"
+ * button that reports the typed wager up to the caller (App.tsx owns the
+ * worker round-trip). Renders the caller's most recent result for this row
+ * once it arrives, and a one-line note when the typed wager matches the
+ * equity-optimal one (only computable when `optimalWager` is available —
+ * i.e. a V-table is cached).
+ */
+function WhatIfRow({
+  ddEventIndex, event, optimalWager, pending, result, onWhatIfWager, dollars,
+}: {
+  ddEventIndex: number;
+  event: DDEvent;
+  optimalWager: number | null;
+  pending: boolean;
+  result: WhatIfResult | null;
+  onWhatIfWager?: (ddEventIndex: number, whatIfWagerAmount: number) => void;
+  dollars: (v: number) => string;
+}) {
+  // Real-rules DD wager bounds: at least $5, at most the greater of your
+  // score going in or the clue's own face value.
+  const minWager = 5;
+  const maxWager = Math.max(minWager, event.scoreBefore, event.clueValue ?? 0);
+  const [wagerInput, setWagerInput] = useState(String(event.wager));
+
+  const parsedWager = Math.round(Number(wagerInput));
+  const clampedWager = Number.isFinite(parsedWager)
+    ? Math.min(maxWager, Math.max(minWager, parsedWager))
+    : event.wager;
+
+  const pp = (v: number) => Math.round(v * 100);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <span style={{ color: 'var(--text-muted)' }}>$</span>
+        <input
+          type="number"
+          aria-label={`What-if wager for Daily Double ${ddEventIndex}`}
+          min={minWager}
+          max={maxWager}
+          value={wagerInput}
+          onChange={e => setWagerInput(e.target.value)}
+          style={{
+            width: 72,
+            fontSize: 11,
+            fontFamily: 'monospace',
+            background: 'var(--bg-panel)',
+            color: 'var(--text-h)',
+            border: '1px solid var(--border)',
+            borderRadius: 3,
+            padding: '2px 4px',
+          }}
+        />
+        <button
+          onClick={() => onWhatIfWager?.(ddEventIndex, clampedWager)}
+          disabled={pending}
+          style={{
+            background: 'none',
+            border: '1px solid var(--border)',
+            color: 'var(--accent, var(--text-h))',
+            borderRadius: 4,
+            padding: '2px 8px',
+            fontSize: 11,
+            cursor: pending ? 'default' : 'pointer',
+            opacity: pending ? 0.6 : 1,
+          }}
+        >
+          {pending ? 'Simulating…' : 'What if'}
+        </button>
+      </div>
+      {result && (
+        <div style={{ color: 'var(--text-h)' }}>
+          Win chance: {pp(result.actualWinRate)}% with your {dollars(result.actualWager)} → {pp(result.whatIfWinRate)}% with {dollars(result.whatIfWagerAmount)}
+          {' '}({result.diff >= 0 ? '+' : ''}{pp(result.diff)} ± {pp(result.se)} pp)
+          {optimalWager !== null && Math.abs(result.whatIfWagerAmount - optimalWager) < 5 && (
+            <div>This is the equity-optimal wager for this state.</div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
