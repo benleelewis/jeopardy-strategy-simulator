@@ -118,3 +118,82 @@ describe('ContributionGraph — keyboard season zoom (P3)', () => {
     expect(screen.queryByRole('button', { name: '← All Seasons' })).not.toBeInTheDocument();
   });
 });
+
+describe('ContributionGraph — "Gain from optimal play" colour mode (P2 optimal-vs-actual)', () => {
+  // Paired arms per game. gains = optimal - actual = [+0.24, +0.20, 0, -0.30]
+  // -> with GAIN_NEUTRAL = 0.10: better (>0.10): 2, same: 1, worse (<-0.10): 1.
+  // actual mean = 0.40, optimal mean = 1.74/4 = 0.435 -> 44%.
+  const gain = {
+    actual: [0.30, 0.40, 0.50, 0.40],
+    optimal: [0.54, 0.60, 0.50, 0.10],
+  };
+
+  it('describes the gain, not the win rate, in the aria-label', () => {
+    render(
+      <ContributionGraph
+        games={games} winRates={winRates} progress={null} onGameClick={vi.fn()}
+        colorMode="gain" gain={gain} gainProgress={null}
+      />,
+    );
+    const label = screen.getByRole('img').getAttribute('aria-label') || '';
+    expect(label).toContain('colored by gain from optimal play');
+    expect(label).toContain('from 40% to 44%');
+    expect(label).toContain('2 games better');
+    expect(label).toContain('1 about the same');
+    expect(label).toContain('1 games worse');
+    // Never the win-rate vocabulary in this mode.
+    expect(label).not.toContain('favored');
+  });
+
+  it('reports the delta sweep progress while it runs', () => {
+    render(
+      <ContributionGraph
+        games={games} winRates={winRates} progress={null} onGameClick={vi.fn()}
+        colorMode="gain" gain={null} gainProgress={0.33}
+      />,
+    );
+    const label = screen.getByRole('img').getAttribute('aria-label') || '';
+    expect(label).toContain('Computing gain from optimal play');
+    expect(label).toContain('33%');
+  });
+
+  it('says not yet computed before the sweep lands, even when win rates exist', () => {
+    render(
+      <ContributionGraph
+        games={games} winRates={winRates} progress={null} onGameClick={vi.fn()}
+        colorMode="gain" gain={null} gainProgress={null}
+      />,
+    );
+    const label = screen.getByRole('img').getAttribute('aria-label') || '';
+    expect(label).toContain('Gain from optimal play not yet computed');
+  });
+
+  it('offscreen table shows the mean gain per season in signed points', () => {
+    render(
+      <ContributionGraph
+        games={games} winRates={winRates} progress={null} onGameClick={vi.fn()}
+        colorMode="gain" gain={gain} gainProgress={null}
+      />,
+    );
+    const table = screen.getByRole('table');
+    expect(within(table).getByText('Gain from optimal play by season')).toBeInTheDocument();
+    expect(within(table).getByText('Mean gain from optimal play')).toBeInTheDocument();
+    const rows = within(table).getAllByRole('row');
+    // Season 1: mean of +0.24, +0.20 = +22pp; Season 2: mean of 0, -0.30 = -15pp
+    expect(within(rows[1]).getByText('+22pp')).toBeInTheDocument();
+    expect(within(rows[2]).getByText('−15pp')).toBeInTheDocument();
+  });
+
+  it('omitting colorMode is the default win-rate mode (same aria-label and table as before)', () => {
+    render(
+      <ContributionGraph
+        games={games} winRates={winRates} progress={null} onGameClick={vi.fn()}
+        gain={gain} gainProgress={0.5}
+      />,
+    );
+    const label = screen.getByRole('img').getAttribute('aria-label') || '';
+    expect(label).toContain('Overall win rate 50%');
+    expect(label).not.toContain('gain');
+    expect(within(screen.getByRole('table')).getByText('Win rate by season')).toBeInTheDocument();
+  });
+});

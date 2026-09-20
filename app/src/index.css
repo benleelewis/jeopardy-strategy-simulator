@@ -23,6 +23,9 @@
   /* Not simulated yet. Deliberately neutral: the win-rate ramp is navy through
      gold, so a grey cannot be mistaken for a low win rate. */
   --cg-empty: #d4d7dd;
+  /* "Gain from optimal play" mode: about-the-same cells. Darker than
+     --cg-empty so a computed zero reads differently from not-yet-computed. */
+  --cg-neutral: #9aa0ad;
 
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
@@ -51,6 +54,7 @@
   --cg-4: #c5a028;
   --cg-5: #f5d442;
   --cg-empty: #7c83a0;
+  --cg-neutral: #a8adc4;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -69,6 +73,7 @@
     --cg-4: #c5a028;
     --cg-5: #f5d442;
     --cg-empty: #3a4150;
+    --cg-neutral: #6b7280;
   }
 }
 
