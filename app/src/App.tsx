@@ -9,6 +9,7 @@ import { GamesControls } from './components/GamesControls';
 import { YourNumber } from './components/YourNumber';
 import { MarginalReturns } from './components/MarginalReturns';
 import { StrategyOracle } from './components/StrategyOracle';
+import { OutcomeDistribution } from './components/OutcomeDistribution';
 import { DDHeatStrip } from './components/DDHeatStrip';
 import { GameAnalyzer, type GameEstimate } from './components/GameAnalyzer';
 import { DEFAULT_CONFIG, type DDStrategy, type SimConfig } from './sim/sim-engine';
@@ -968,6 +969,20 @@ export default function App() {
                   xAxis={xAxis}
                   yAxis={yAxis}
                 />
+                {/* Phase 1E "How your games end": score distribution + win
+                    margin histogram + variance visualization, directly
+                    under StatsPanel's position readout. Own worker
+                    (computeOutcomes), same debounce/cancel pattern as
+                    MarginalReturns/StrategyOracle below. */}
+                <div style={{ padding: '0 16px 12px' }}>
+                  <OutcomeDistribution
+                    xAxis={xAxis}
+                    yAxis={yAxis}
+                    position={position}
+                    pinnedValues={pinnedValues}
+                    config={config}
+                  />
+                </div>
                 <div style={{ padding: '12px 16px' }}>
                   <MarginalReturns
                     xAxis={xAxis}

@@ -623,3 +623,17 @@
     transition: none;
   }
 }
+
+/* OutcomeDistribution ("How your games end") fades its stale result while
+   a fresh 1,000-game sample is computed — same 150ms opacity crossfade
+   StrategyOracle uses inline, pulled into a class here so reduced-motion
+   can flatten it below. */
+.outcome-distribution-body {
+  transition: opacity 150ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .outcome-distribution-body {
+    transition: none;
+  }
+}
