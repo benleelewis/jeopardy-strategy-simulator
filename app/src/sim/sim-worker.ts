@@ -63,6 +63,20 @@
  *   OUT: { type: 'gamesDeltaProgress', pct, requestId }
  *   OUT: { type: 'gamesDeltaResult', results: { actual, optimal }[],
  *          _simsPerGame, requestId }
+ *
+ *   IN:  { type: 'computeOutcomes', xAxis, yAxis, xVal, yVal, pinnedValues,
+ *          config, nGames?, seed?, requestId? }
+ *        "How your games end" (OutcomeDistribution side panel, Phase 1E).
+ *        Runs `nGames` (default 1,000) seeded games at the given position,
+ *        history-tracked so each game's pre-FJ (post-DJ) and post-FJ (final)
+ *        scores are both available. Classifies each game from its pre-FJ
+ *        standings as a 'runaway' (you led by more than double 2nd place
+ *        going into FJ — FJ could not change the winner), 'lockAgainst' (an
+ *        opponent had that same lock), or 'decided' (neither — FJ could
+ *        still swing it).
+ *   OUT: { type: 'outcomesProgress', pct, requestId }
+ *   OUT: { type: 'outcomesResult', outcomes: OutcomeRow[], runawayShare,
+ *          lockAgainstShare, decidedShare, requestId }
  */
 
 import {
@@ -121,6 +135,9 @@ const DEFAULT_ORACLE_SEED = 0x0AC1E;
 /** Default seed for computeGamesDelta — the delta sweep is reproducible
  *  across repeat mode switches at the same knobs. */
 const DEFAULT_GAMES_DELTA_SEED = 0x6A1AED;
+/** Default seed for computeOutcomes — reproducible across repeat opens of
+ *  the "How your games end" panel at the same position/settings. */
+const DEFAULT_OUTCOMES_SEED = 0x0117C0;
 
 /** One game's two paired arms from `buildGamesDelta`. The gain shown on the
  *  All Games graph is `optimal - current`; the headline uses both means. */
@@ -532,6 +549,42 @@ self.onmessage = (e: MessageEvent) => {
       you: { knowledge: player.b * player.p, buzzerSpeed: player.buzzerSpeed },
     });
   }
+
+  if (msg.type === 'computeOutcomes') {
+    const {
+      xAxis = 'knowledge',
+      yAxis = 'buzzerSpeed',
+      xVal,
+      yVal,
+      pinnedValues = {},
+      nGames = 1000,
+      seed = DEFAULT_OUTCOMES_SEED,
+      requestId,
+    } = msg;
+    const config = msg.config ?? DEFAULT_CONFIG;
+
+    if (!DIMENSIONS[xAxis as DimensionName]) {
+      self.postMessage({ type: 'error', message: `Unknown dimension: ${xAxis}` });
+      return;
+    }
+    if (!DIMENSIONS[yAxis as DimensionName]) {
+      self.postMessage({ type: 'error', message: `Unknown dimension: ${yAxis}` });
+      return;
+    }
+
+    const result = computeOutcomes(
+      { xAxis: xAxis as DimensionName, yAxis: yAxis as DimensionName, xVal, yVal, pinnedValues, config },
+      nGames,
+      seed,
+      {
+        onProgress: (pct) => self.postMessage({ type: 'outcomesProgress', pct, requestId }),
+        isCancelled: () => cancelled,
+      },
+    );
+    if (result === null) return; // cancelled mid-computation — mirrors computeGrid's abort-silently semantics
+
+    self.postMessage({ type: 'outcomesResult', ...result, requestId });
+  }
 };
 
 /** Extract pinned-compatible values from SimConfig for dimensions that use config fields */
@@ -853,4 +906,144 @@ export function buildGamesDelta(
   }
 
   return results;
+}
+
+/**
+ * "How your games end" (OutcomeDistribution side panel, Phase 1E) — one
+ * simulated game's pre/post-Final-Jeopardy scores plus how it was decided.
+ */
+export interface OutcomeRow {
+  /** Your score after Double Jeopardy, before Final Jeopardy is played. */
+  yourPreFJ: number;
+  /** Your final score (after FJ, or equal to yourPreFJ if FJ is off). */
+  yourPostFJ: number;
+  /** The higher of the two opponents' scores, before FJ. */
+  bestOpponentPreFJ: number;
+  /** The higher of the two opponents' final scores. */
+  bestOpponentPostFJ: number;
+  /** yourPostFJ - bestOpponentPostFJ. Positive means you won by that much. */
+  margin: number;
+  /**
+   * How the game was decided, from the PRE-FJ standings: 'runaway' — you
+   * led going into FJ by more than double 2nd place, so FJ could not change
+   * the outcome (a classic Jeopardy "lock game", generalized: the leader's
+   * score must exceed 2x the runner-up's, clamped at 0 so a negative
+   * runner-up score still counts as "doubled"). 'lockAgainst' — the same
+   * lock, but held by an opponent. 'decided' — no lock; FJ could still
+   * swing the result.
+   */
+  category: 'runaway' | 'lockAgainst' | 'decided';
+}
+
+export interface OutcomesSummary {
+  outcomes: OutcomeRow[];
+  runawayShare: number;
+  lockAgainstShare: number;
+  decidedShare: number;
+}
+
+export interface OutcomesInput {
+  xAxis: DimensionName;
+  yAxis: DimensionName;
+  xVal: number;
+  yVal: number;
+  pinnedValues: Record<string, number>;
+  config: SimConfig;
+}
+
+/**
+ * Pure builder behind the `computeOutcomes` message, exported for direct
+ * unit testing like `buildDDImpactGrid`/`computeOracle` above. Runs `nGames`
+ * seeded games (golden-ratio-stride per-game seeds, same scheme as
+ * `computeOracle`, so results are reproducible independent of iteration
+ * order) at the resolved position, history-tracked so both the pre-FJ
+ * (post-DJ) and post-FJ (final) scores are available per game.
+ *
+ * Returns `null` if `hooks.isCancelled()` becomes true mid-computation,
+ * mirroring `buildDDImpactGrid`'s abort-silently semantics.
+ */
+export function computeOutcomes(
+  input: OutcomesInput,
+  nGames = 1000,
+  seed: number = DEFAULT_OUTCOMES_SEED,
+  hooks: { onProgress?: (pct: number) => void; isCancelled?: () => boolean } = {},
+): OutcomesSummary | null {
+  const { xAxis, yAxis, xVal, yVal, pinnedValues, config } = input;
+
+  const { player, config: cellConfig, opponentProfile } = buildSimParams(
+    xAxis,
+    yAxis,
+    xVal,
+    yVal,
+    { ...pinnedValues, ...configToPinned(config) },
+  );
+  const mergedConfig: SimConfig = resolveDDStrategy(config, cellConfig, xAxis, yAxis);
+
+  const outcomes: OutcomeRow[] = [];
+  let runawayCount = 0;
+  let lockAgainstCount = 0;
+  let decidedCount = 0;
+  const progressInterval = Math.max(1, Math.floor(nGames / 50));
+
+  for (let i = 0; i < nGames; i++) {
+    if (hooks.isCancelled?.()) return null;
+
+    const rng = mulberry32((seed + Math.imul(i, 0x9E3779B9)) >>> 0);
+    const opp1 = sampleOpponent(opponentProfile, rng);
+    const opp2 = sampleOpponent(opponentProfile, rng);
+    const result = simulateGame(player, opp1, opp2, mergedConfig, true, rng);
+
+    const postFJ = result.scores;
+    // `history`'s last entry is always the final scores; when FJ was
+    // played (trackHistory && includeFJ), the entry just before it is the
+    // post-DJ (pre-FJ) state. When FJ wasn't played, pre-FJ === post-FJ.
+    const history = result.history ?? [postFJ];
+    const preFJ: [number, number, number] = mergedConfig.includeFJ && history.length >= 2
+      ? history[history.length - 2]
+      : postFJ;
+
+    const bestOpponentPreFJ = Math.max(preFJ[1], preFJ[2]);
+    const bestOpponentPostFJ = Math.max(postFJ[1], postFJ[2]);
+    const margin = postFJ[0] - bestOpponentPostFJ;
+
+    // Lock determination uses the PRE-FJ standings — this is the state FJ
+    // is about to be played from.
+    const sortedPreFJ = [...preFJ].sort((a, b) => b - a);
+    const leaderScore = sortedPreFJ[0];
+    const secondScore = sortedPreFJ[1];
+    const leaderIdx = preFJ.indexOf(leaderScore);
+    const isLock = leaderScore > 2 * Math.max(secondScore, 0);
+
+    let category: OutcomeRow['category'];
+    if (isLock && leaderIdx === 0) {
+      category = 'runaway';
+      runawayCount++;
+    } else if (isLock) {
+      category = 'lockAgainst';
+      lockAgainstCount++;
+    } else {
+      category = 'decided';
+      decidedCount++;
+    }
+
+    outcomes.push({
+      yourPreFJ: preFJ[0],
+      yourPostFJ: postFJ[0],
+      bestOpponentPreFJ,
+      bestOpponentPostFJ,
+      margin,
+      category,
+    });
+
+    if (i % progressInterval === 0) {
+      hooks.onProgress?.(i / nGames);
+    }
+  }
+
+  return {
+    outcomes,
+    runawayShare: runawayCount / nGames,
+    lockAgainstShare: lockAgainstCount / nGames,
+    decidedShare: decidedCount / nGames,
+  };
 }

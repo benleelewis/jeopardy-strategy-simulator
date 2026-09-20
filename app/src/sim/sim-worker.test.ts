@@ -6,7 +6,7 @@
 // This file only calls the exported pure `buildDDImpactGrid` builder
 // directly; it never dispatches a message through `self.onmessage`.
 import { describe, it, expect } from 'vitest';
-import { buildDDImpactGrid, buildGamesDelta, resolveDDStrategy } from './sim-worker';
+import { buildDDImpactGrid, buildGamesDelta, computeOutcomes, resolveDDStrategy } from './sim-worker';
 import { DEFAULT_CONFIG, mulberry32, type SimConfig } from './sim-engine';
 import { buildSimParams } from './dimensions';
 import { OPPONENT_PROFILES } from './opponent-models';
@@ -158,5 +158,57 @@ describe('buildGamesDelta — All Games "Gain from optimal play" (TODOS P2 optim
       { isCancelled: () => ++calls > 2 },
     );
     expect(results).toBeNull();
+  });
+});
+
+describe('computeOutcomes — "How your games end" (Phase 1E)', () => {
+  const input = {
+    xAxis: 'knowledge' as const,
+    yAxis: 'buzzerSpeed' as const,
+    xVal: 0.6,
+    yVal: 0.5,
+    pinnedValues: {},
+    config: DEFAULT_CONFIG,
+  };
+
+  it('returns 1,000 outcomes with finite scores for the default nGames', () => {
+    const summary = computeOutcomes(input, undefined, 0x1234);
+    expect(summary).not.toBeNull();
+    expect(summary!.outcomes).toHaveLength(1000);
+    for (const o of summary!.outcomes) {
+      expect(Number.isFinite(o.yourPreFJ)).toBe(true);
+      expect(Number.isFinite(o.yourPostFJ)).toBe(true);
+      expect(Number.isFinite(o.bestOpponentPreFJ)).toBe(true);
+      expect(Number.isFinite(o.bestOpponentPostFJ)).toBe(true);
+      expect(Number.isFinite(o.margin)).toBe(true);
+      expect(['runaway', 'lockAgainst', 'decided']).toContain(o.category);
+    }
+  });
+
+  it('runaway/lockAgainst/decided shares sum to 1', () => {
+    const summary = computeOutcomes(input, 500, 0xABCD);
+    expect(summary).not.toBeNull();
+    const { runawayShare, lockAgainstShare, decidedShare } = summary!;
+    expect(runawayShare + lockAgainstShare + decidedShare).toBeCloseTo(1, 10);
+    // Sanity: shares match the counted categories.
+    const counted = summary!.outcomes.reduce(
+      (acc, o) => ({ ...acc, [o.category]: acc[o.category] + 1 }),
+      { runaway: 0, lockAgainst: 0, decided: 0 } as Record<string, number>,
+    );
+    expect(runawayShare).toBeCloseTo(counted.runaway / 500, 10);
+    expect(lockAgainstShare).toBeCloseTo(counted.lockAgainst / 500, 10);
+    expect(decidedShare).toBeCloseTo(counted.decided / 500, 10);
+  });
+
+  it('is deterministic given the same seed', () => {
+    const a = computeOutcomes(input, 300, 0x5EED);
+    const b = computeOutcomes(input, 300, 0x5EED);
+    expect(a).toEqual(b);
+  });
+
+  it('returns null when cancelled mid-computation', () => {
+    let calls = 0;
+    const summary = computeOutcomes(input, 100, 0x1, { isCancelled: () => ++calls > 2 });
+    expect(summary).toBeNull();
   });
 });
