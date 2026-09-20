@@ -505,13 +505,18 @@ function configToPinned(config: SimConfig): Record<string, number> {
  * this is also why the regression-locked default (App.tsx's pre-E-7
  * hardcoded `ddStrategy: 'aggressive'`) is untouched.
  */
-function resolveDDStrategy(
+export function resolveDDStrategy(
   config: SimConfig,
   cellConfig: SimConfig,
   xAxis: string,
   yAxis: string,
 ): SimConfig {
   const merged: SimConfig = { ...config, ...cellConfig };
+  // cellConfig starts from DEFAULT_CONFIG (buildSimParams), which sets
+  // includeFJ: true, so spreading it last silently discarded the user's FJ
+  // toggle for every grid, marginal-returns and DD-impact cell. Re-apply it.
+  // (Found while building the oracle, whose FJ-off probe read exactly 0.0.)
+  if (config.includeFJ !== undefined) merged.includeFJ = config.includeFJ;
   const exploringDDAggressionAxis = xAxis === 'ddAggression' || yAxis === 'ddAggression';
   const selector = config.ddStrategy as DDStrategy | undefined;
   if (!exploringDDAggressionAxis && selector && selector !== 'aggressive') {

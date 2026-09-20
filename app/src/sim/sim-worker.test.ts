@@ -6,8 +6,9 @@
 // This file only calls the exported pure `buildDDImpactGrid` builder
 // directly; it never dispatches a message through `self.onmessage`.
 import { describe, it, expect } from 'vitest';
-import { buildDDImpactGrid } from './sim-worker';
+import { buildDDImpactGrid, resolveDDStrategy } from './sim-worker';
 import { DEFAULT_CONFIG, type SimConfig } from './sim-engine';
+import { buildSimParams } from './dimensions';
 
 describe('buildDDImpactGrid — P2 DD impact difference map overlay (TODOS.md)', () => {
   it('is exactly zero everywhere when the active DD strategy is already "off"', () => {
@@ -67,5 +68,19 @@ describe('buildDDImpactGrid — P2 DD impact difference map overlay (TODOS.md)',
       { isCancelled: () => ++calls > 2 },
     );
     expect(grid).toBeNull();
+  });
+});
+
+describe("resolveDDStrategy keeps the user's Final Jeopardy toggle", () => {
+  const cell = () => buildSimParams('knowledge', 'buzzerSpeed', 0.5, 0.5, {}).config;
+
+  it('includeFJ: false survives the merge with the DEFAULT_CONFIG-based cell config', () => {
+    const merged = resolveDDStrategy({ ...DEFAULT_CONFIG, includeFJ: false }, cell(), 'knowledge', 'buzzerSpeed');
+    expect(merged.includeFJ).toBe(false);
+  });
+
+  it('includeFJ: true is unchanged (the regression-locked default)', () => {
+    const merged = resolveDDStrategy({ ...DEFAULT_CONFIG, includeFJ: true }, cell(), 'knowledge', 'buzzerSpeed');
+    expect(merged.includeFJ).toBe(true);
   });
 });
