@@ -6,8 +6,12 @@
 // This file only calls the exported pure `buildDDImpactGrid` builder
 // directly; it never dispatches a message through `self.onmessage`.
 import { describe, it, expect } from 'vitest';
-import { buildDDImpactGrid, buildGamesDelta, resolveDDStrategy } from './sim-worker';
-import { DEFAULT_CONFIG, mulberry32, type SimConfig } from './sim-engine';
+import {
+  buildDDImpactGrid, buildGamesDelta, resolveDDStrategy,
+  computeWhatIfWager, sampleRemainingBoardForRound, estimateRemainingDDCount,
+  DEFAULT_WHAT_IF_SEED, type WhatIfWagerEvent,
+} from './sim-worker';
+import { DEFAULT_CONFIG, mulberry32, playerFrom2Axis, simulateFromState, sampleOpponent, type SimConfig, type SimState, type Player } from './sim-engine';
 import { buildSimParams } from './dimensions';
 import { OPPONENT_PROFILES } from './opponent-models';
 import { buildValueTable, type ValueTable } from './value-function';
@@ -158,5 +162,73 @@ describe('buildGamesDelta — All Games "Gain from optimal play" (TODOS P2 optim
       { isCancelled: () => ++calls > 2 },
     );
     expect(results).toBeNull();
+  });
+});
+
+describe('computeWhatIfWager — "What if you had wagered differently?" (TASKS.md Phase 1F)', () => {
+  const you: Player = playerFrom2Axis(0.5, 0.5);
+  const opponentProfiles: [typeof OPPONENT_PROFILES.average, typeof OPPONENT_PROFILES.average] = [
+    OPPONENT_PROFILES.average,
+    OPPONENT_PROFILES.average,
+  ];
+  const config: SimConfig = { ...DEFAULT_CONFIG };
+
+  const event: WhatIfWagerEvent = {
+    round: 'DJ',
+    scoresBefore: [6000, 4000, 3000],
+    cluesRemainingAfter: 10,
+    correct: true,
+    wager: 3000,
+  };
+
+  it("the actual-wager arm equals a direct simulateFromState rollout with the same seeds", () => {
+    const n = 200;
+    const result = computeWhatIfWager(you, opponentProfiles, event, 6000, config, n, DEFAULT_WHAT_IF_SEED);
+    expect(result).not.toBeNull();
+
+    // Reconstruct the actual arm by hand, using the exact same per-rollout
+    // seed derivation, board sampling, and opponent draws `computeWhatIfWager`
+    // itself uses (all exported for exactly this purpose).
+    const actualScores: [number, number, number] = [...event.scoresBefore];
+    actualScores[0] += event.correct ? event.wager : -event.wager;
+    const ddCount = estimateRemainingDDCount(event.round, event.cluesRemainingAfter);
+
+    let wins = 0;
+    for (let i = 0; i < n; i++) {
+      const rollSeed = (DEFAULT_WHAT_IF_SEED + i * 7919) >>> 0;
+      const rng = mulberry32(rollSeed);
+      const remaining = sampleRemainingBoardForRound(event.round, event.cluesRemainingAfter, rng);
+      const opp1 = sampleOpponent(opponentProfiles[0], rng);
+      const opp2 = sampleOpponent(opponentProfiles[1], rng);
+      const state: SimState = {
+        scores: actualScores, round: event.round, remainingClueValues: remaining, remainingDDCount: ddCount,
+      };
+      if (simulateFromState(state, [you, opp1, opp2], config, rng, false).winner === 0) wins++;
+    }
+
+    expect(result!.actualWinRate).toBe(wins / n);
+  });
+
+  it('what-if with the same wager as actual gives exactly 0 difference', () => {
+    const result = computeWhatIfWager(you, opponentProfiles, event, event.wager, config, 300, DEFAULT_WHAT_IF_SEED);
+    expect(result).not.toBeNull();
+    expect(result!.whatIfWinRate).toBe(result!.actualWinRate);
+    expect(result!.diff).toBe(0);
+    expect(result!.se).toBe(0);
+  });
+
+  it('is deterministic given the same seed', () => {
+    const a = computeWhatIfWager(you, opponentProfiles, event, 8000, config, 300, 0xABCD);
+    const b = computeWhatIfWager(you, opponentProfiles, event, 8000, config, 300, 0xABCD);
+    expect(a).toEqual(b);
+  });
+
+  it('returns null when cancelled mid-computation', () => {
+    let calls = 0;
+    const result = computeWhatIfWager(
+      you, opponentProfiles, event, 8000, config, 500, DEFAULT_WHAT_IF_SEED,
+      { isCancelled: () => ++calls > 5 },
+    );
+    expect(result).toBeNull();
   });
 });
