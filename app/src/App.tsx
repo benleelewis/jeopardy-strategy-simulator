@@ -2,7 +2,8 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { HeatMap } from './components/HeatMap';
 import { ControlsPanel } from './components/ControlsPanel';
 import { StatsPanel } from './components/StatsPanel';
-import { ContributionGraph, type GameData } from './components/ContributionGraph';
+import { ContributionGraph, type GameData, type ColorMode, type GainData } from './components/ContributionGraph';
+import { GainHeader, type GainTableStatus } from './components/GainHeader';
 import { GameDetail, type SimRun, type DDGameDetail } from './components/GameDetail';
 import { GamesControls } from './components/GamesControls';
 import { YourNumber } from './components/YourNumber';
@@ -76,6 +77,8 @@ interface AppState {
   theme: 'clean' | 'jeopardy';
   tab: 'your-game' | 'explorer' | 'games';
   refinedSpeed: RefinedSpeed;
+  /** All Games colour mode (P2 optimal-vs-actual). Only encoded when 'gain'. */
+  colorMode: ColorMode;
 }
 
 function encodeState(s: AppState): string {
@@ -89,6 +92,9 @@ function encodeState(s: AppState): string {
     `tab=${s.tab}`,
     `sp=${s.refinedSpeed[0]}`, // 'f' | 'n' | 'p' — Speed vs Accuracy (P-1C)
   ];
+  // Only encode the non-default colour mode, so default-mode hashes are
+  // byte-identical to before this control existed.
+  if (s.colorMode === 'gain') parts.push('cm=g');
   // Only encode non-default pinned values
   for (const [name, val] of Object.entries(s.pinned)) {
     if (name !== s.xAxis && name !== s.yAxis) {
@@ -133,6 +139,10 @@ function decodeState(hash: string): Partial<AppState> | null {
   if (sp === 'f') result.refinedSpeed = 'fast';
   else if (sp === 'n') result.refinedSpeed = 'normal';
   else if (sp === 'p') result.refinedSpeed = 'precise';
+
+  const cm = params.get('cm');
+  if (cm === 'g') result.colorMode = 'gain';
+  else if (cm === 'w') result.colorMode = 'winRate';
 
   // Pinned values
   const pinned: Record<string, number> = {};
@@ -218,6 +228,20 @@ export default function App() {
   // DD events for the currently selected game (additive to the existing
   // unseeded singleGameResults path above).
   const [ddGameDetail, setDdGameDetail] = useState<DDGameDetail | null>(null);
+  // TODOS "P2 — All Games optimal-vs-actual delta coloring": second colour
+  // mode. 'winRate' (default) leaves every existing path untouched; 'gain'
+  // additionally runs the paired computeGamesDelta sweep below.
+  const [colorMode, setColorMode] = useState<ColorMode>(initial?.colorMode ?? 'winRate');
+  const [gameGain, setGameGain] = useState<GainData | null>(null);
+  const [gameGainProgress, setGameGainProgress] = useState<number | null>(null);
+  const gainDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const gainPassRef = useRef<'idle' | 'fast' | 'refined'>('idle');
+  // Bumped on every new sweep and on leaving gain mode; results carrying an
+  // older requestId are dropped (the worker itself cannot interrupt a
+  // running loop, so this is how "cancel on mode switch" takes effect).
+  const gainRequestIdRef = useRef(0);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const prevGainParamsRef = useRef<any>({});
 
   // Persistent worker for all-games simulation (avoids re-serializing 1MB games array)
   const gameWorkerRef = useRef<Worker | null>(null);
@@ -289,11 +313,12 @@ export default function App() {
       theme,
       tab,
       refinedSpeed,
+      colorMode,
     };
     const hash = encodeState(state);
     // Use replaceState to avoid polluting browser history on every drag
     window.history.replaceState(null, '', `#${hash}`);
-  }, [position, xAxis, yAxis, pinnedValues, includeFJ, theme, tab, refinedSpeed]);
+  }, [position, xAxis, yAxis, pinnedValues, includeFJ, theme, tab, refinedSpeed, colorMode]);
 
   // --- Load games.json on mount ---
   useEffect(() => {
@@ -397,6 +422,33 @@ export default function App() {
         console.warn('V-table build failed — Optimal (equity) unavailable, falling back to Aggressive.', msg.message);
         setEquityBuildStatus('failed');
         setDdStrategy('aggressive');
+      } else if (msg.type === 'gamesDeltaProgress') {
+        if (msg.requestId === gainRequestIdRef.current) setGameGainProgress(msg.pct);
+      } else if (msg.type === 'gamesDeltaResult') {
+        // Stale: the mode was switched off or the knobs changed since this
+        // sweep was requested — never apply it.
+        if (msg.requestId !== gainRequestIdRef.current) return;
+        const results = msg.results as { actual: number; optimal: number }[];
+        setGameGain({
+          actual: results.map(r => r.actual),
+          optimal: results.map(r => r.optimal),
+        });
+        if (msg._simsPerGame <= 2 && gainPassRef.current === 'fast') {
+          // Fast pass done — refined pass at the same sims/game as the
+          // win-rate sweep's refined pass, so the two colourings are
+          // equally resolved.
+          gainPassRef.current = 'refined';
+          setGameGainProgress(0);
+          worker.postMessage({
+            type: 'computeGamesDelta',
+            ...prevGainParamsRef.current,
+            simsPerGame: 25,
+            requestId: msg.requestId,
+          });
+        } else {
+          setGameGainProgress(null);
+          gainPassRef.current = 'idle';
+        }
       }
     };
 
@@ -468,6 +520,93 @@ export default function App() {
     setEquityBuildProgress(0);
     setDdStrategy('aggressive');
   }, []);
+
+  // --- Gain mode: the optimal arm needs the V-table for the current knobs.
+  // Same build request as the E-7 effect above (same message, seed and
+  // cache key, same persistent worker), only triggered by the colour mode
+  // instead of the DD Strategy selector. When Optimal IS selected the E-7
+  // effect already owns the build, so this one stays out of its way.
+  useEffect(() => {
+    if (colorMode !== 'gain' || tab !== 'games') return;
+    if (ddStrategy === 'equity') return;
+    if (valueTableCache[currentCacheKey]) return;
+    const worker = gameWorkerRef.current;
+    if (!worker || !gamesLoadedInWorker.current) return;
+    // No "already in flight" short-circuit here, on purpose: under StrictMode
+    // the worker effect's cleanup terminates the first worker and this effect
+    // re-fires against the new one, exactly like the E-7 effect above.
+
+    equityBuildCancelledRef.current = false;
+    equityBuildingActiveRef.current = true;
+    equityBuildKeyRef.current = currentCacheKey;
+    setEquityBuildStatus('building');
+    setEquityBuildProgress(0);
+
+    const opponentProfile = interpolateOpponent(
+      pinnedValues.opponentStrength ?? DIMENSIONS.opponentStrength.defaultValue,
+    );
+    worker.postMessage({
+      type: 'buildValueTable',
+      opponentProfile,
+      config: {
+        includeFJ,
+        rhoB: DEFAULT_CONFIG.rhoB,
+        rhoP: DEFAULT_CONFIG.rhoP,
+        ddWagerFraction: pinnedValues.ddAggression ?? DIMENSIONS.ddAggression.defaultValue,
+        fjStrategy: 'standard',
+      },
+      seed: 0xf00d,
+      cacheKey: currentCacheKey,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [colorMode, tab, ddStrategy, currentCacheKey, games]);
+
+  // --- Gain mode: cancel on mode switch. Late results are dropped by the
+  // requestId check in the worker handler; the graph goes back to the
+  // win-rate colouring immediately.
+  useEffect(() => {
+    if (colorMode === 'gain') return;
+    gainRequestIdRef.current++;
+    gainPassRef.current = 'idle';
+    if (gainDebounceRef.current) clearTimeout(gainDebounceRef.current);
+    setGameGain(null);
+    setGameGainProgress(null);
+  }, [colorMode]);
+
+  // --- Gain mode: run the paired delta sweep (only while the mode is
+  // selected, on the games tab, once the V-table exists). Mirrors the
+  // win-rate sweep above: 300ms debounce, fast pass at 2 sims/game, then
+  // the refined pass is chained from the result handler.
+  useEffect(() => {
+    if (tab !== 'games' || colorMode !== 'gain') return;
+    if (!cachedValueTable) return; // re-fires when the build lands
+    if (!gameWorkerRef.current || !gamesLoadedInWorker.current) return;
+
+    if (gainDebounceRef.current) clearTimeout(gainDebounceRef.current);
+
+    gainDebounceRef.current = setTimeout(() => {
+      const worker = gameWorkerRef.current;
+      if (!worker) return;
+
+      const requestId = ++gainRequestIdRef.current;
+      const gainParams = { xAxis, yAxis, xVal, yVal, pinnedValues, config, valueTable: cachedValueTable };
+      prevGainParamsRef.current = gainParams;
+      gainPassRef.current = 'fast';
+      setGameGainProgress(0);
+
+      worker.postMessage({
+        type: 'computeGamesDelta',
+        ...gainParams,
+        simsPerGame: 2,
+        requestId,
+      });
+    }, 300);
+
+    return () => {
+      if (gainDebounceRef.current) clearTimeout(gainDebounceRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, colorMode, position.x, position.y, xAxis, yAxis, includeFJ, pinnedValues, ddStrategy, cachedValueTable, games]);
 
   // --- Trigger all-games sim with debounce ---
   // Mark stale on any parameter change
@@ -654,6 +793,12 @@ export default function App() {
     setPulseToken(t => t + 1);
   }, [xAxis, yAxis, position]);
 
+  // Gain mode's V-table state for the header: the cache is the source of
+  // truth ('ready' the moment a table exists for the current knobs).
+  const gainTableStatus: GainTableStatus = cachedValueTable
+    ? 'ready'
+    : equityBuildStatus === 'failed' ? 'failed' : 'building';
+
   return (
     <div className={`app ${theme}`}>
       <header className="app-header">
@@ -820,7 +965,17 @@ export default function App() {
                   onFJChange={setIncludeFJ}
                   ddStrategy={ddStrategy}
                   equityActive={ddStrategy === 'equity'}
+                  colorMode={colorMode}
+                  onColorModeChange={setColorMode}
                 />
+                {colorMode === 'gain' ? (
+                  <GainHeader
+                    gain={gameGain}
+                    progress={gameGainProgress}
+                    tableStatus={gainTableStatus}
+                    tableProgress={equityBuildProgress}
+                  />
+                ) : (
                 <div className="games-header">
                   <p className="games-subtitle">
                     Every regular-season game, colored by your simulated win rate.
@@ -844,12 +999,16 @@ export default function App() {
                     ))}
                   </div>
                 </div>
+                )}
                 <div className="games-body">
                   <ContributionGraph
                     games={games}
                     winRates={gameWinRates}
                     progress={gameSimProgress}
                     onGameClick={handleGameClick}
+                    colorMode={colorMode}
+                    gain={gameGain}
+                    gainProgress={gameGainProgress}
                   />
                   {selectedGame !== null && games[selectedGame] && (
                     <div className="game-detail-container">

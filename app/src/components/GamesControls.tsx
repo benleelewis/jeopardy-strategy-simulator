@@ -1,5 +1,6 @@
 import { DIMENSIONS, getPinnedDimNames, valueToFraction, fractionToValue, type DimensionName } from '../sim/dimensions';
 import type { DDStrategy } from '../sim/sim-engine';
+import type { ColorMode } from './gain';
 
 const STRATEGY_LABELS: Record<DDStrategy, string> = {
   off: 'Off',
@@ -25,12 +26,27 @@ interface Props {
   /** While Optimal is active, the FJ checkbox is a cache-key knob shared
    *  with ControlsPanel's lock treatment (same field, same cache key). */
   equityActive: boolean;
+  /** All Games colour mode (TODOS "P2 — All Games optimal-vs-actual delta
+   *  coloring"). Default 'winRate'; the control only renders when a
+   *  change handler is supplied. */
+  colorMode?: ColorMode;
+  onColorModeChange?: (mode: ColorMode) => void;
 }
+
+const COLOR_MODE_OPTIONS: { value: ColorMode; label: string; title: string }[] = [
+  { value: 'winRate', label: 'Win rate', title: 'Color each game by your simulated win rate' },
+  {
+    value: 'gain',
+    label: 'Gain from optimal play',
+    title: 'Color each game by how much optimal wagering and Daily Double seeking would change your win rate',
+  },
+];
 
 export function GamesControls({
   position, onPositionChange, xAxis, yAxis,
   pinnedValues, onPinnedChange, includeFJ, onFJChange,
   ddStrategy, equityActive,
+  colorMode = 'winRate', onColorModeChange,
 }: Props) {
   // The dims a player can tune here: the two Explorer axes plus whatever
   // pinned dims apply for that axis pair (P-1) — minus environment dims
@@ -95,6 +111,23 @@ export function GamesControls({
         />
         <span>{equityActive && <span aria-hidden="true">🔒 </span>}Include FJ</span>
       </label>
+      {onColorModeChange && (
+        <div className="gc-color-mode" role="group" aria-label="Color mode">
+          <span className="gc-label">Color</span>
+          {COLOR_MODE_OPTIONS.map(opt => (
+            <button
+              key={opt.value}
+              type="button"
+              className={`gc-mode-btn ${colorMode === opt.value ? 'gc-mode-active' : ''}`}
+              aria-pressed={colorMode === opt.value}
+              title={opt.title}
+              onClick={() => onColorModeChange(opt.value)}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
       {/* E-7: read-only reflection of the DD Strategy selector (ControlsPanel
           is the editable single source, on the Explorer tab). */}
       <span className="gc-strategy-badge" title="Change on the Explorer tab">

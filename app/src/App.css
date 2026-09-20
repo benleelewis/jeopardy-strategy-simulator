@@ -334,6 +334,55 @@
   color: var(--text-h);
 }
 
+/* All Games colour mode (P2 optimal-vs-actual delta coloring) */
+.gc-color-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.gc-color-mode .gc-label {
+  min-width: 0;
+}
+
+.gc-mode-btn {
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.gc-mode-btn:hover {
+  border-color: var(--accent, #58a6ff);
+  color: var(--text-h);
+}
+
+.gc-mode-btn[aria-pressed="true"],
+.gc-mode-active {
+  border-color: var(--accent, #58a6ff);
+  background: var(--accent, #58a6ff);
+  color: #fff;
+  font-weight: 600;
+}
+
+.gain-headline {
+  font-size: 16px;
+  color: var(--text-h);
+}
+
+.gain-headline strong {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-h);
+}
+
 /* Your Game tab */
 .your-game-container {
   flex: 1;
