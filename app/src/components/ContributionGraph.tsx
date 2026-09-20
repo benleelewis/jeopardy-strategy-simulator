@@ -1,4 +1,5 @@
 import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
+import { GAIN_NEUTRAL, GAIN_STRONG, formatGain, type ColorMode, type GainData } from './gain';
 
 export interface GameData {
   s: number;       // season
@@ -7,11 +8,19 @@ export interface GameData {
       { n: string; k: number; b: number; fj: number; c: number }];
 }
 
+export type { ColorMode, GainData } from './gain';
+
 interface Props {
   games: GameData[];
   winRates: number[] | null;  // parallel array, one per game
   progress: number | null;    // 0-1 during simulation, null when idle
   onGameClick: (index: number) => void;
+  /** Default 'winRate' — the graph as it is today. */
+  colorMode?: ColorMode;
+  /** Gain mode only: per-game paired arms. null until the delta sweep lands. */
+  gain?: GainData | null;
+  /** Gain mode only: 0-1 during the delta sweep, null when idle. */
+  gainProgress?: number | null;
 }
 
 const CELL_SIZE = 6;
@@ -75,8 +84,24 @@ function shuffleIndices(n: number): number[] {
   return order;
 }
 
-export function ContributionGraph({ games, winRates, progress, onGameClick }: Props) {
+export function ContributionGraph({
+  games, winRates, progress, onGameClick,
+  colorMode = 'winRate', gain = null, gainProgress = null,
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const isGain = colorMode === 'gain';
+
+  // Gain mode: per-game optimal - actual. null until the sweep lands.
+  const gains = useMemo(() => {
+    if (!isGain || !gain) return null;
+    return gain.optimal.map((o, i) => o - gain.actual[i]);
+  }, [isGain, gain]);
+
+  // The array the cells are coloured by and the progress that drives the
+  // reveal animation. In the default mode these ARE `winRates`/`progress`
+  // (same references), so every memo/effect below behaves exactly as before.
+  const values = isGain ? gains : winRates;
+  const activeProgress = isGain ? gainProgress : progress;
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredGame, setHoveredGame] = useState<number | null>(null);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
@@ -95,10 +120,10 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
 
   // Build revealed set from progress
   const revealedSet = useMemo(() => {
-    if (progress === null || !winRates) return null; // show all when done
-    const count = Math.floor(progress * games.length);
+    if (activeProgress === null || !values) return null; // show all when done
+    const count = Math.floor(activeProgress * games.length);
     return new Set(revealOrder.slice(0, count));
-  }, [progress, games.length, winRates, revealOrder]);
+  }, [activeProgress, games.length, values, revealOrder]);
 
   // Widest season, in games — sets the canvas column count
   const maxCols = useMemo(() => {
@@ -127,7 +152,46 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
     return { total, overall: sum / total, favored, underdog, tossUp: total - favored - underdog };
   }, [winRates]);
 
+  // Gain-mode headline stats: the two arm means and better/same/worse counts.
+  const gainSummary = useMemo(() => {
+    if (!isGain || !gain || !gains || gains.length === 0) return null;
+    let sumActual = 0;
+    let sumOptimal = 0;
+    let better = 0;
+    let worse = 0;
+    for (let i = 0; i < gains.length; i++) {
+      sumActual += gain.actual[i];
+      sumOptimal += gain.optimal[i];
+      if (gains[i] > GAIN_NEUTRAL) better++;
+      else if (gains[i] < -GAIN_NEUTRAL) worse++;
+    }
+    const total = gains.length;
+    return {
+      total,
+      meanActual: sumActual / total,
+      meanOptimal: sumOptimal / total,
+      better,
+      worse,
+      same: total - better - worse,
+    };
+  }, [isGain, gain, gains]);
+
   const ariaLabel = useMemo(() => {
+    if (isGain) {
+      if (gainProgress !== null) {
+        return `Computing gain from optimal play for ${games.length} games… ${Math.round(gainProgress * 100)}% complete.`;
+      }
+      if (!gainSummary) {
+        return `Contribution graph of ${games.length} games. Gain from optimal play not yet computed.`;
+      }
+      const { total, meanActual, meanOptimal, better, same, worse } = gainSummary;
+      return `Contribution graph of ${total} games, colored by gain from optimal play. `
+        + `Optimal wagering and DD seeking would ${meanOptimal >= meanActual ? 'lift' : 'move'} `
+        + `your win rate from ${Math.round(meanActual * 100)}% `
+        + `to ${Math.round(meanOptimal * 100)}%. `
+        + `${better} games better (gain over ${Math.round(GAIN_NEUTRAL * 100)} points), `
+        + `${same} about the same, ${worse} games worse.`;
+    }
     if (progress !== null) {
       return `Simulating win rates for ${games.length} games… ${Math.round(progress * 100)}% complete.`;
     }
@@ -138,18 +202,19 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
     return `Contribution graph of ${total} games. Overall win rate ${Math.round(overall * 100)}%. `
       + `${favored} favored games (win rate over 50%), ${tossUp} toss-up games (30% to 50%), `
       + `${underdog} underdog games (win rate under 30%).`;
-  }, [progress, games.length, winRateSummary]);
+  }, [isGain, gainProgress, gainSummary, progress, games.length, winRateSummary]);
 
   // Per-season summary: mean win rate + game count, for the offscreen table.
+  // In gain mode `values` is the per-game gain, so this is the mean gain.
   const seasonSummaries = useMemo(() => {
     return seasonOrder.map(season => {
       const indices = seasonMap.get(season) || [];
       let meanWinRate: number | null = null;
-      if (winRates) {
+      if (values) {
         let sum = 0;
         let n = 0;
         for (const gi of indices) {
-          const wr = winRates[gi];
+          const wr = values[gi];
           if (wr !== undefined) {
             sum += wr;
             n++;
@@ -159,7 +224,7 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
       }
       return { season, count: indices.length, meanWinRate };
     });
-  }, [seasonOrder, seasonMap, winRates]);
+  }, [seasonOrder, seasonMap, values]);
 
   // Zoomed calendar grid
   const zoomGrid = useMemo(() => {
@@ -182,6 +247,7 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
       cg4: get('--cg-4', '#c5a028'),
       cg5: get('--cg-5', '#f5d442'),
       cgEmpty: get('--cg-empty', '#d4d7dd'),
+      cgNeutral: get('--cg-neutral', '#9aa0ad'),
     };
   }, []);
 
@@ -194,14 +260,26 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
     return colors.cg5;
   }, []);
 
+  // Gain → diverging colour: blue = worse, neutral grey = about the same,
+  // gold = better. Reuses the win-rate ramp's ends so both modes share a theme.
+  const gainColorFn = useCallback((g: number, colors: ReturnType<typeof getColors>) => {
+    if (g <= -GAIN_STRONG) return colors.cg2;
+    if (g < -GAIN_NEUTRAL) return colors.cg3;
+    if (g <= GAIN_NEUTRAL) return colors.cgNeutral;
+    if (g < GAIN_STRONG) return colors.cg4;
+    return colors.cg5;
+  }, []);
+
+  const valueColorFn = isGain ? gainColorFn : winRateColorFn;
+
   // Get cell color considering reveal animation
   const getCellColor = useCallback((gi: number, colors: ReturnType<typeof getColors>) => {
     if (hoveredGame === gi) return '#ffffff';
-    if (!winRates || winRates[gi] === undefined) return colors.cgEmpty;
+    if (!values || values[gi] === undefined) return colors.cgEmpty;
     // During simulation, only show revealed cells
     if (revealedSet && !revealedSet.has(gi)) return colors.cgEmpty;
-    return winRateColorFn(winRates[gi], colors);
-  }, [winRates, hoveredGame, revealedSet, winRateColorFn]);
+    return valueColorFn(values[gi], colors);
+  }, [values, hoveredGame, revealedSet, valueColorFn]);
 
   // Draw canvas — all-seasons view
   useEffect(() => {
@@ -250,7 +328,7 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
         ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
       }
     }
-  }, [games, winRates, hoveredGame, zoomedSeason, getColors, getCellColor, seasonOrder, seasonMap, maxCols]);
+  }, [games, values, hoveredGame, zoomedSeason, getColors, getCellColor, seasonOrder, seasonMap, maxCols]);
 
   // Draw canvas — zoomed season view
   useEffect(() => {
@@ -311,7 +389,7 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
         ctx.fillRect(x, y, ZOOM_CELL_SIZE, ZOOM_CELL_SIZE);
       }
     }
-  }, [zoomedSeason, zoomGrid, games, winRates, hoveredGame, getColors, getCellColor]);
+  }, [zoomedSeason, zoomGrid, games, values, hoveredGame, getColors, getCellColor]);
 
   // Hit test — all-seasons or zoomed
   const hitTest = useCallback((clientX: number, clientY: number): { gi: number | null; seasonClick: number | null } => {
@@ -353,8 +431,16 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
     setHoveredGame(gi);
     if (gi !== null && games[gi]) {
       const game = games[gi];
-      const wr = winRates?.[gi];
-      const wrText = wr !== undefined ? `${Math.round(wr * 100)}% win` : 'simulating...';
+      let wrText: string;
+      if (isGain) {
+        const g = gains?.[gi];
+        wrText = g !== undefined && gain
+          ? `${Math.round(gain.actual[gi] * 100)}% → ${Math.round(gain.optimal[gi] * 100)}% (${formatGain(g)})`
+          : 'computing gain...';
+      } else {
+        const wr = winRates?.[gi];
+        wrText = wr !== undefined ? `${Math.round(wr * 100)}% win` : 'simulating...';
+      }
       setTooltip({
         x: e.clientX,
         y: e.clientY,
@@ -363,7 +449,7 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
     } else {
       setTooltip(null);
     }
-  }, [hitTest, games, winRates]);
+  }, [hitTest, games, winRates, isGain, gains, gain]);
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     const { gi, seasonClick } = hitTest(e.clientX, e.clientY);
@@ -420,12 +506,12 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
           affects the canvas drawing or mouse interaction above. */}
       <div className="visually-hidden">
         <table>
-          <caption>Win rate by season</caption>
+          <caption>{isGain ? 'Gain from optimal play by season' : 'Win rate by season'}</caption>
           <thead>
             <tr>
               <th scope="col">Season</th>
               <th scope="col">Games</th>
-              <th scope="col">Mean win rate</th>
+              <th scope="col">{isGain ? 'Mean gain from optimal play' : 'Mean win rate'}</th>
             </tr>
           </thead>
           <tbody>
@@ -433,7 +519,9 @@ export function ContributionGraph({ games, winRates, progress, onGameClick }: Pr
               <tr key={season}>
                 <td>Season {season}</td>
                 <td>{count}</td>
-                <td>{meanWinRate !== null ? `${Math.round(meanWinRate * 100)}%` : 'Not yet simulated'}</td>
+                <td>{meanWinRate !== null
+                  ? (isGain ? formatGain(meanWinRate) : `${Math.round(meanWinRate * 100)}%`)
+                  : (isGain ? 'Not yet computed' : 'Not yet simulated')}</td>
               </tr>
             ))}
           </tbody>

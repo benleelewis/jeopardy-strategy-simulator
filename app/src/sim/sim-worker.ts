@@ -52,6 +52,17 @@
  *   OUT: { type: 'simSingleGameDetailResult', gameIndex, results: { scores, winner, history, ddEvents }[] }
  *        (history/ddEvents feed GameDetail's per-run chart and, additively,
  *        GameReplay's "Watch this game" animation — Phase 1D)
+ *   IN:  { type: 'computeGamesDelta', xAxis, yAxis, xVal, yVal, pinnedValues,
+ *          config, simsPerGame, valueTable?, seed?, requestId? }
+ *        All Games "Gain from optimal play" colour mode (TODOS "P2 — All
+ *        Games optimal-vs-actual delta coloring"). Same per-game loop and
+ *        simsPerGame as simAllGames, run twice per game with IDENTICAL
+ *        seeds: once with the current settings, once with optimal strategy
+ *        (ddStrategy 'equity' + squareSelection 'ddSeek', everything else
+ *        as set). Never sent in the default colour mode.
+ *   OUT: { type: 'gamesDeltaProgress', pct, requestId }
+ *   OUT: { type: 'gamesDeltaResult', results: { actual, optimal }[],
+ *          _simsPerGame, requestId }
  */
 
 import {
@@ -65,7 +76,7 @@ import {
   type DDEvent,
   DEFAULT_CONFIG,
 } from './sim-engine';
-import { buildValueTable } from './value-function';
+import { buildValueTable, type ValueTable } from './value-function';
 import { DIMENSIONS, buildSimParams, type DimensionName } from './dimensions';
 import { calibrateOpponent } from './calibrate';
 import {
@@ -107,6 +118,19 @@ const DEFAULT_DD_IMPACT_SEED = 0xD1F5eed;
 /** Default seed for computeOracle — one seed shared by every probe so the
  *  ranking is reproducible and probe differences isolate the knob moved. */
 const DEFAULT_ORACLE_SEED = 0x0AC1E;
+/** Default seed for computeGamesDelta — the delta sweep is reproducible
+ *  across repeat mode switches at the same knobs. */
+const DEFAULT_GAMES_DELTA_SEED = 0x6A1AED;
+
+/** One game's two paired arms from `buildGamesDelta`. The gain shown on the
+ *  All Games graph is `optimal - current`; the headline uses both means. */
+export interface GameDeltaResult {
+  /** Win rate with the settings as currently set. */
+  actual: number;
+  /** Win rate with optimal strategy: ddStrategy 'equity' (+ V-table) and
+   *  squareSelection 'ddSeek', everything else as set. */
+  optimal: number;
+}
 
 let cancelled = false;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -353,6 +377,45 @@ self.onmessage = (e: MessageEvent) => {
     }
 
     self.postMessage({ type: 'simAllGamesResult', results, _simsPerGame: simsPerGame });
+  }
+
+  if (msg.type === 'computeGamesDelta') {
+    const {
+      xAxis = 'knowledge',
+      yAxis = 'buzzerSpeed',
+      xVal,
+      yVal,
+      pinnedValues = {},
+      simsPerGame = 1,
+      seed = DEFAULT_GAMES_DELTA_SEED,
+      requestId,
+    } = msg;
+    const games = msg.games ?? storedGames;
+    if (!games || games.length === 0) {
+      self.postMessage({ type: 'error', message: 'No games loaded' });
+      return;
+    }
+    const config = msg.config ?? DEFAULT_CONFIG;
+
+    const results = buildGamesDelta(
+      games,
+      xAxis as DimensionName,
+      yAxis as DimensionName,
+      xVal,
+      yVal,
+      pinnedValues,
+      config,
+      simsPerGame,
+      msg.valueTable,
+      seed,
+      {
+        onProgress: (pct) => self.postMessage({ type: 'gamesDeltaProgress', pct, requestId }),
+        isCancelled: () => cancelled,
+      },
+    );
+    if (results === null) return; // cancelled mid-computation — mirrors simAllGames' abort-silently semantics
+
+    self.postMessage({ type: 'gamesDeltaResult', results, _simsPerGame: simsPerGame, requestId });
   }
 
   if (msg.type === 'computeWinRate') {
@@ -696,4 +759,95 @@ export function computeOracle(
     baselineWinRate: estimates.baseline.winRate,
     gamesPerEstimate: games,
   };
+ * All Games "Gain from optimal play" (TODOS "P2 — All Games optimal-vs-actual
+ * delta coloring") — pure per-game builder, exported for direct unit
+ * testing (no `self`/postMessage dependency; the `computeGamesDelta`
+ * message handler above is a thin wrapper that adds progress/cancellation).
+ *
+ * Mirrors the `simAllGames` loop exactly — same Coryat-calibrated opponent
+ * sampling, same `simsPerGame` — but runs each simulation TWICE with the
+ * same seed: once with the current settings (resolved exactly like
+ * simAllGames resolves them) and once with optimal strategy forced on
+ * (`ddStrategy: 'equity'` with `valueTable`, `squareSelection: 'ddSeek'`).
+ * Seeds are derived per (game, sim) so each pair shares its opponent
+ * samples, clue draws and buzz races until the two strategies diverge.
+ * When the current settings already ARE optimal, both arms are the same
+ * simulation run twice with the same seed, so every gain is exactly 0.
+ *
+ * `valueTable` is passed separately from `config.valueTable` because in the
+ * default colour mode App.tsx's config only carries a table while Optimal
+ * is the selected DD strategy; the optimal arm needs it regardless. When
+ * it is undefined the engine's documented fallback applies (equity ->
+ * 'aggressive' preset), so callers should build the table first.
+ *
+ * Returns `null` if `hooks.isCancelled()` becomes true mid-computation.
+ */
+export function buildGamesDelta(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  games: any[],
+  xAxis: DimensionName,
+  yAxis: DimensionName,
+  xVal: number,
+  yVal: number,
+  pinnedValues: Record<string, number>,
+  config: SimConfig,
+  simsPerGame: number,
+  valueTable: ValueTable | undefined,
+  seed: number = DEFAULT_GAMES_DELTA_SEED,
+  hooks: { onProgress?: (pct: number) => void; isCancelled?: () => boolean } = {},
+): GameDeltaResult[] | null {
+  const { player, config: cellConfig } = buildSimParams(
+    xAxis,
+    yAxis,
+    xVal,
+    yVal,
+    { ...pinnedValues, ...configToPinned(config) },
+  );
+  // Same resolution as simAllGames' current-settings config...
+  const currentConfig: SimConfig = resolveDDStrategy(config, cellConfig, xAxis, yAxis);
+  // ...vs. the same config with optimal strategy forced on. `ddWagerFraction`
+  // must be cleared: when set it overrides the ddStrategy enum entirely.
+  const optimalConfig: SimConfig = {
+    ...currentConfig,
+    ddStrategy: 'equity',
+    ddWagerFraction: undefined,
+    valueTable: valueTable ?? currentConfig.valueTable,
+    squareSelection: 'ddSeek',
+  };
+
+  const results: GameDeltaResult[] = [];
+  const totalGames = games.length;
+  const progressInterval = Math.max(1, Math.floor(totalGames / 50));
+
+  for (let gi = 0; gi < totalGames; gi++) {
+    if (hooks.isCancelled?.()) return null;
+
+    const game = games[gi];
+    const opp1Profile = calibrateOpponent(game.o[0]);
+    const opp2Profile = calibrateOpponent(game.o[1]);
+    let winsActual = 0;
+    let winsOptimal = 0;
+
+    for (let s = 0; s < simsPerGame; s++) {
+      const simSeed = (seed + gi * simsPerGame + s) >>> 0;
+
+      const rngCurrent = mulberry32(simSeed);
+      const c1 = sampleOpponent(opp1Profile, rngCurrent);
+      const c2 = sampleOpponent(opp2Profile, rngCurrent);
+      if (simulateGame(player, c1, c2, currentConfig, false, rngCurrent).winner === 0) winsActual++;
+
+      const rngOptimal = mulberry32(simSeed);
+      const o1 = sampleOpponent(opp1Profile, rngOptimal);
+      const o2 = sampleOpponent(opp2Profile, rngOptimal);
+      if (simulateGame(player, o1, o2, optimalConfig, false, rngOptimal).winner === 0) winsOptimal++;
+    }
+
+    results.push({ actual: winsActual / simsPerGame, optimal: winsOptimal / simsPerGame });
+
+    if (gi % progressInterval === 0) {
+      hooks.onProgress?.(gi / totalGames);
+    }
+  }
+
+  return results;
 }
