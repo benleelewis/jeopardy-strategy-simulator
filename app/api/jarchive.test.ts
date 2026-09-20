@@ -13,7 +13,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import handler from './jarchive';
 import type { JArchiveGameResponse } from '../src/lib/jarchive';
 
-const FIXTURE_PATH = resolve(__dirname, '../../data/jarchive-cache/game-9501.html');
+const FIXTURE_PATH = resolve(__dirname, '../src/lib/__fixtures__/game-9501.html');
 
 interface FakeRes {
   statusCode: number;

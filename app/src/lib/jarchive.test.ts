@@ -1,8 +1,8 @@
 /**
  * Unit tests for the shared J-Archive parser (app/src/lib/jarchive.ts),
- * against the cached game-9501 fixture (data/jarchive-cache/game-9501.html —
- * gitignored; copy it from the main checkout's data/jarchive-cache/ before
- * running these locally, same as `scripts/dd-advisor.ts` needs it cached).
+ * against the game-9501 fixture (src/lib/__fixtures__/game-9501.html): one
+ * J-Archive page, committed so CI has it. data/jarchive-cache/ is the CLI's
+ * gitignored cache and is not used here.
  *
  * Loaded via Vite's `?raw` import (declared by `vite/client`, already in
  * tsconfig.app.json's `types`) rather than `fs.readFileSync`: this file
@@ -15,7 +15,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { parseGame, replay, playerStats } from './jarchive';
-import fixtureHtml from '../../../data/jarchive-cache/game-9501.html?raw';
+import fixtureHtml from './__fixtures__/game-9501.html?raw';
 
 function loadFixture(): string {
   return fixtureHtml;
