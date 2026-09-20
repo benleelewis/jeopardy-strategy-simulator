@@ -58,6 +58,13 @@ interface ValueTableCacheInputs {
   ddWagerFraction: number;
   fjStrategy: string;
   includeFJ: boolean;
+  /** P2 "DD seeking / square-selection strategy" (TODOS.md): the rollouts
+   *  this table is built from thread `config` straight into
+   *  `simulateFromState`, so a square-selection change invalidates it. */
+  squareSelection: string;
+  opponentSquareSelection: string;
+  /** Task 3: changes DD wager math inside the same rollouts. */
+  ddDifficultyScaling: boolean;
 }
 
 function valueTableCacheKey(inputs: ValueTableCacheInputs): string {
@@ -76,6 +83,15 @@ interface AppState {
   theme: 'clean' | 'jeopardy';
   tab: 'your-game' | 'explorer' | 'games';
   refinedSpeed: RefinedSpeed;
+  /** P2 "DD seeking / square-selection strategy" (TODOS.md). Your (player 0)
+   *  and opponents' square-selection strategy. Both default off. */
+  seekDD: boolean;
+  opponentSeekDD: boolean;
+  /** P2 "DD impact difference map overlay" (TODOS.md). Off by default. */
+  showDDImpact: boolean;
+  /** Task 3: gates whether DD accuracy is scaled by the difficulty-by-row
+   *  multiplier. Default true (today's behavior). */
+  ddDifficultyScaling: boolean;
 }
 
 function encodeState(s: AppState): string {
@@ -88,6 +104,10 @@ function encodeState(s: AppState): string {
     `t=${s.theme === 'jeopardy' ? 'j' : 'c'}`,
     `tab=${s.tab}`,
     `sp=${s.refinedSpeed[0]}`, // 'f' | 'n' | 'p' — Speed vs Accuracy (P-1C)
+    `sk=${s.seekDD ? 1 : 0}`, // DD seeking (TODOS.md P2) — you
+    `osk=${s.opponentSeekDD ? 1 : 0}`, // DD seeking — opponents
+    `di=${s.showDDImpact ? 1 : 0}`, // DD impact overlay toggle
+    `dds=${s.ddDifficultyScaling ? 1 : 0}`, // Task 3: scale DD accuracy by row
   ];
   // Only encode non-default pinned values
   for (const [name, val] of Object.entries(s.pinned)) {
@@ -134,6 +154,18 @@ function decodeState(hash: string): Partial<AppState> | null {
   else if (sp === 'n') result.refinedSpeed = 'normal';
   else if (sp === 'p') result.refinedSpeed = 'precise';
 
+  const sk = params.get('sk');
+  if (sk !== null) result.seekDD = sk !== '0';
+
+  const osk = params.get('osk');
+  if (osk !== null) result.opponentSeekDD = osk !== '0';
+
+  const di = params.get('di');
+  if (di !== null) result.showDDImpact = di !== '0';
+
+  const dds = params.get('dds');
+  if (dds !== null) result.ddDifficultyScaling = dds !== '0';
+
   // Pinned values
   const pinned: Record<string, number> = {};
   for (const [key, val] of params.entries()) {
@@ -176,10 +208,16 @@ export default function App() {
   // pass. Default 'normal' (450) reproduces the pre-existing hardcoded
   // behavior/timing exactly.
   const [refinedSpeed, setRefinedSpeed] = useState<RefinedSpeed>(initial?.refinedSpeed ?? 'normal');
-  // P2 "DD impact difference map overlay" (TODOS.md). Off by default, not
-  // persisted in the URL hash (a per-session viewing toggle, not a
-  // strategy/knob choice).
-  const [showDDImpact, setShowDDImpact] = useState(false);
+  // P2 "DD impact difference map overlay" (TODOS.md). Off by default.
+  const [showDDImpact, setShowDDImpact] = useState(initial?.showDDImpact ?? false);
+  // P2 "DD seeking / square-selection strategy" (TODOS.md). Your (player 0)
+  // and opponents' square-selection strategy — Tesauro 2012's p_DD + 0.1·p_RC
+  // Daily Double seeking. Both off (today's top-down order) by default.
+  const [seekDD, setSeekDD] = useState(initial?.seekDD ?? false);
+  const [opponentSeekDD, setOpponentSeekDD] = useState(initial?.opponentSeekDD ?? false);
+  // Task 3: gates whether DD accuracy is scaled by the difficulty-by-row
+  // multiplier. Default true — today's behavior, byte-identical.
+  const [ddDifficultyScaling, setDdDifficultyScaling] = useState(initial?.ddDifficultyScaling ?? true);
   // Landing tab is All Games: it is the one view that reads on its own, with
   // no numbers to type in first. Your Game and Explorer are opt-in from there.
   const [tab, setTab] = useState<AppState['tab']>(initial?.tab ?? 'games');
@@ -242,7 +280,10 @@ export default function App() {
     ddWagerFraction: pinnedValues.ddAggression ?? DIMENSIONS.ddAggression.defaultValue,
     fjStrategy: 'standard',
     includeFJ,
-  }), [pinnedValues.opponentStrength, pinnedValues.ddAggression, includeFJ]);
+    squareSelection: seekDD ? 'ddSeek' : 'default',
+    opponentSquareSelection: opponentSeekDD ? 'ddSeek' : 'default',
+    ddDifficultyScaling,
+  }), [pinnedValues.opponentStrength, pinnedValues.ddAggression, includeFJ, seekDD, opponentSeekDD, ddDifficultyScaling]);
 
   const cachedValueTable = valueTableCache[currentCacheKey];
 
@@ -251,6 +292,13 @@ export default function App() {
   const config = useMemo(() => {
     const cfg: SimConfig = { ...DEFAULT_CONFIG, includeFJ };
     if (clueStats?.ddRowWeights) cfg.ddRowWeights = clueStats.ddRowWeights;
+    // P2 "DD seeking / square-selection strategy" (TODOS.md): shared App
+    // state, applies to the Explorer grid, the All Games sweep, and the
+    // Your Game estimate's V-table (all consume this one `config` object).
+    cfg.squareSelection = seekDD ? 'ddSeek' : 'default';
+    cfg.opponentSquareSelection = opponentSeekDD ? 'ddSeek' : 'default';
+    // Task 3: gates DD accuracy's difficulty-by-row scaling.
+    cfg.ddDifficultyScaling = ddDifficultyScaling;
 
     if (ddStrategy === 'equity') {
       // Equity dispatch (sim-engine.ts) needs a valueTable; until one is
@@ -275,7 +323,7 @@ export default function App() {
       cfg.ddStrategy = ddStrategy;
     }
     return cfg;
-  }, [includeFJ, xAxis, yAxis, pinnedValues, ddStrategy, cachedValueTable, clueStats]);
+  }, [includeFJ, xAxis, yAxis, pinnedValues, ddStrategy, cachedValueTable, clueStats, seekDD, opponentSeekDD, ddDifficultyScaling]);
 
   // --- URL hash sync (write) ---
   useEffect(() => {
@@ -289,11 +337,15 @@ export default function App() {
       theme,
       tab,
       refinedSpeed,
+      seekDD,
+      opponentSeekDD,
+      showDDImpact,
+      ddDifficultyScaling,
     };
     const hash = encodeState(state);
     // Use replaceState to avoid polluting browser history on every drag
     window.history.replaceState(null, '', `#${hash}`);
-  }, [position, xAxis, yAxis, pinnedValues, includeFJ, theme, tab, refinedSpeed]);
+  }, [position, xAxis, yAxis, pinnedValues, includeFJ, theme, tab, refinedSpeed, seekDD, opponentSeekDD, showDDImpact, ddDifficultyScaling]);
 
   // --- Load games.json on mount ---
   useEffect(() => {
@@ -450,6 +502,14 @@ export default function App() {
         rhoP: DEFAULT_CONFIG.rhoP,
         ddWagerFraction: pinnedValues.ddAggression ?? DIMENSIONS.ddAggression.defaultValue,
         fjStrategy: 'standard',
+        // P2 "DD seeking / square-selection strategy" (TODOS.md): the Your
+        // Game estimate's equity chart reads this V-table, so it must be
+        // built under the same square-selection knobs as the Explorer grid
+        // and All Games sweep.
+        squareSelection: seekDD ? 'ddSeek' : 'default',
+        opponentSquareSelection: opponentSeekDD ? 'ddSeek' : 'default',
+        // Task 3: DD wager math inside these same rollouts.
+        ddDifficultyScaling,
       },
       seed: 0xf00d,
       cacheKey: currentCacheKey,
@@ -790,6 +850,12 @@ export default function App() {
                   onRefinedSpeedChange={setRefinedSpeed}
                   showDDImpact={showDDImpact}
                   onShowDDImpactChange={setShowDDImpact}
+                  seekDD={seekDD}
+                  onSeekDDChange={setSeekDD}
+                  opponentSeekDD={opponentSeekDD}
+                  onOpponentSeekDDChange={setOpponentSeekDD}
+                  ddDifficultyScaling={ddDifficultyScaling}
+                  onDdDifficultyScalingChange={setDdDifficultyScaling}
                 />
               </details>
             </div>
@@ -820,6 +886,10 @@ export default function App() {
                   onFJChange={setIncludeFJ}
                   ddStrategy={ddStrategy}
                   equityActive={ddStrategy === 'equity'}
+                  seekDD={seekDD}
+                  onSeekDDChange={setSeekDD}
+                  opponentSeekDD={opponentSeekDD}
+                  onOpponentSeekDDChange={setOpponentSeekDD}
                 />
                 <div className="games-header">
                   <p className="games-subtitle">

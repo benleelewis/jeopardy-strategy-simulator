@@ -32,6 +32,19 @@ interface Props {
   /** P2 "DD impact difference map overlay" (TODOS.md). Off by default. */
   showDDImpact: boolean;
   onShowDDImpactChange: (v: boolean) => void;
+  /** P2 "DD seeking / square-selection strategy" (TODOS.md). Your (player 0)
+   *  square-selection strategy — Tesauro 2012's p_DD + 0.1·p_RC Daily
+   *  Double seeking. Off (top-down) by default. */
+  seekDD: boolean;
+  onSeekDDChange: (v: boolean) => void;
+  /** Opponents' square-selection strategy. Off by default — mirroring your
+   *  choice would silently make "you seek DDs" mean "everyone seeks DDs". */
+  opponentSeekDD: boolean;
+  onOpponentSeekDDChange: (v: boolean) => void;
+  /** Task 3: gates whether DD accuracy is scaled by the difficulty-by-row
+   *  multiplier (checked/on = today's behavior, the default). */
+  ddDifficultyScaling: boolean;
+  onDdDifficultyScalingChange: (v: boolean) => void;
 }
 
 const sectionStyle: React.CSSProperties = {
@@ -72,6 +85,9 @@ export function ControlsPanel({
   equityBuildStatus, equityBuildProgress, onCancelEquityBuild,
   refinedSpeed, onRefinedSpeedChange,
   showDDImpact, onShowDDImpactChange,
+  seekDD, onSeekDDChange,
+  opponentSeekDD, onOpponentSeekDDChange,
+  ddDifficultyScaling, onDdDifficultyScalingChange,
 }: Props) {
   // Pinned dimensions for the current axis pair (P-1: several dims write
   // the same Player fields, so only the dims that actually apply for these
@@ -125,6 +141,22 @@ export function ControlsPanel({
             onChange={(e) => onShowDDImpactChange(e.target.checked)}
           />
           Show DD impact
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, cursor: 'pointer', fontSize: '13px', color: 'var(--text)' }}>
+          <input
+            type="checkbox"
+            checked={seekDD}
+            onChange={(e) => onSeekDDChange(e.target.checked)}
+          />
+          Seek Daily Doubles
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, cursor: 'pointer', fontSize: '13px', color: 'var(--text)' }}>
+          <input
+            type="checkbox"
+            checked={opponentSeekDD}
+            onChange={(e) => onOpponentSeekDDChange(e.target.checked)}
+          />
+          Opponents seek too
         </label>
       </div>
 
@@ -249,6 +281,25 @@ export function ControlsPanel({
         </div>
         <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: 6 }}>
           {REFINED_GAMES_PER_CELL[refinedSpeed].toLocaleString()} games/cell on the refined pass
+        </div>
+      </div>
+
+      <div style={{ ...sectionStyle, fontWeight: 600, fontSize: '14px', color: 'var(--text-h)' }}>
+        Advanced
+      </div>
+      <div style={sectionStyle}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '13px', color: 'var(--text)' }}>
+          <input
+            type="checkbox"
+            checked={ddDifficultyScaling}
+            onChange={(e) => onDdDifficultyScalingChange(e.target.checked)}
+          />
+          Scale DD accuracy by row
+        </label>
+        <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: 6 }}>
+          On (default): a bottom-row Daily Double is answered at reduced accuracy, like any
+          other clue at that value. Off: Daily Double accuracy is your flat base precision
+          (Tesauro 2012's model).
         </div>
       </div>
 

@@ -28,6 +28,12 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof ControlsPanel>
     onRefinedSpeedChange: vi.fn(),
     showDDImpact: false,
     onShowDDImpactChange: vi.fn(),
+    seekDD: false,
+    onSeekDDChange: vi.fn(),
+    opponentSeekDD: false,
+    onOpponentSeekDDChange: vi.fn(),
+    ddDifficultyScaling: true,
+    onDdDifficultyScalingChange: vi.fn(),
     ...overrides,
   };
 }
@@ -192,5 +198,53 @@ describe('ControlsPanel — Show DD impact (P2 TODOS.md)', () => {
 
     await user.click(screen.getByRole('checkbox', { name: 'Show DD impact' }));
     expect(onChange).toHaveBeenCalledWith(true);
+  });
+});
+
+describe('ControlsPanel — DD seeking (TODOS.md P2)', () => {
+  it('both seeking checkboxes are unchecked by default', () => {
+    render(<ControlsPanel {...baseProps({ seekDD: false, opponentSeekDD: false })} />);
+    expect(screen.getByRole('checkbox', { name: 'Seek Daily Doubles' })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Opponents seek too' })).not.toBeChecked();
+  });
+
+  it('reflects checked state independently for you vs opponents', () => {
+    render(<ControlsPanel {...baseProps({ seekDD: true, opponentSeekDD: false })} />);
+    expect(screen.getByRole('checkbox', { name: 'Seek Daily Doubles' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Opponents seek too' })).not.toBeChecked();
+  });
+
+  it('calls onSeekDDChange and onOpponentSeekDDChange when toggled', async () => {
+    const onSeekDDChange = vi.fn();
+    const onOpponentSeekDDChange = vi.fn();
+    const user = userEvent.setup();
+    render(<ControlsPanel {...baseProps({ seekDD: false, onSeekDDChange, opponentSeekDD: false, onOpponentSeekDDChange })} />);
+
+    await user.click(screen.getByRole('checkbox', { name: 'Seek Daily Doubles' }));
+    expect(onSeekDDChange).toHaveBeenCalledWith(true);
+
+    await user.click(screen.getByRole('checkbox', { name: 'Opponents seek too' }));
+    expect(onOpponentSeekDDChange).toHaveBeenCalledWith(true);
+  });
+});
+
+describe('ControlsPanel — Scale DD accuracy by row (Task 3)', () => {
+  it('is checked by default', () => {
+    render(<ControlsPanel {...baseProps({ ddDifficultyScaling: true })} />);
+    expect(screen.getByRole('checkbox', { name: /Scale DD accuracy by row/ })).toBeChecked();
+  });
+
+  it('reflects an unchecked state', () => {
+    render(<ControlsPanel {...baseProps({ ddDifficultyScaling: false })} />);
+    expect(screen.getByRole('checkbox', { name: /Scale DD accuracy by row/ })).not.toBeChecked();
+  });
+
+  it('calls onDdDifficultyScalingChange when toggled', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<ControlsPanel {...baseProps({ ddDifficultyScaling: true, onDdDifficultyScalingChange: onChange })} />);
+
+    await user.click(screen.getByRole('checkbox', { name: /Scale DD accuracy by row/ }));
+    expect(onChange).toHaveBeenCalledWith(false);
   });
 });

@@ -25,12 +25,19 @@ interface Props {
   /** While Optimal is active, the FJ checkbox is a cache-key knob shared
    *  with ControlsPanel's lock treatment (same field, same cache key). */
   equityActive: boolean;
+  /** P2 "DD seeking / square-selection strategy" (TODOS.md). Shared App
+   *  state with ControlsPanel (Explorer) — editable here too, same knob. */
+  seekDD: boolean;
+  onSeekDDChange: (v: boolean) => void;
+  opponentSeekDD: boolean;
+  onOpponentSeekDDChange: (v: boolean) => void;
 }
 
 export function GamesControls({
   position, onPositionChange, xAxis, yAxis,
   pinnedValues, onPinnedChange, includeFJ, onFJChange,
   ddStrategy, equityActive,
+  seekDD, onSeekDDChange, opponentSeekDD, onOpponentSeekDDChange,
 }: Props) {
   // The dims a player can tune here: the two Explorer axes plus whatever
   // pinned dims apply for that axis pair (P-1) — minus environment dims
@@ -94,6 +101,22 @@ export function GamesControls({
           onChange={e => onFJChange(e.target.checked)}
         />
         <span>{equityActive && <span aria-hidden="true">🔒 </span>}Include FJ</span>
+      </label>
+      <label className="gc-checkbox">
+        <input
+          type="checkbox"
+          checked={seekDD}
+          onChange={e => onSeekDDChange(e.target.checked)}
+        />
+        <span>Seek Daily Doubles</span>
+      </label>
+      <label className="gc-checkbox">
+        <input
+          type="checkbox"
+          checked={opponentSeekDD}
+          onChange={e => onOpponentSeekDDChange(e.target.checked)}
+        />
+        <span>Opponents seek too</span>
       </label>
       {/* E-7: read-only reflection of the DD Strategy selector (ControlsPanel
           is the editable single source, on the Explorer tab). */}

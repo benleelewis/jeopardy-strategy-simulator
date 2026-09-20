@@ -172,6 +172,49 @@ describe('sim-engine', () => {
       expect(result2.ddEvents).toEqual(result.ddEvents);
     });
 
+    // Task 3: ddDifficultyScaling gates ONLY the Daily Double branch's
+    // adjustedP (unlike the existing difficultyScaling flag, which also
+    // flattens regular-clue accuracy) — Tesauro 2012 models DD accuracy as
+    // its own flat parameter, independent of the clue's row/value.
+    describe('ddDifficultyScaling (Task 3)', () => {
+      it('false: a seeded game\'s DD adjustedP fields equal the player\'s base precision', () => {
+        const you = makePlayer(0.7, 0.85, 0.6, 0.5);
+        const opp = makePlayer(0.6, 0.87, 0.5, 0.5);
+        const config: SimConfig = { ...DEFAULT_CONFIG, ddStrategy: 'aggressive', ddDifficultyScaling: false };
+        const rng = mulberry32(42);
+        const result = simulateGame(you, opp, opp, config, true, rng);
+
+        expect(result.ddEvents!.length).toBe(3);
+        for (const ev of result.ddEvents!) {
+          const player = ev.player === 0 ? you : opp;
+          expect(ev.adjustedP).toBe(player.p);
+        }
+      });
+
+      it('true (and default/undefined): DD adjustedP fields match the pre-change (row-scaled) values', () => {
+        const you = makePlayer(0.7, 0.85, 0.6, 0.5);
+        const opp = makePlayer(0.6, 0.87, 0.5, 0.5);
+        const baseConfig: SimConfig = { ...DEFAULT_CONFIG, ddStrategy: 'aggressive' };
+
+        // Pre-change reference: no ddDifficultyScaling field at all.
+        const rngA = mulberry32(42);
+        const resultDefault = simulateGame(you, opp, opp, baseConfig, true, rngA);
+
+        // Explicit true must reproduce the exact same values (byte-identical).
+        const rngB = mulberry32(42);
+        const resultExplicitTrue = simulateGame(you, opp, opp, { ...baseConfig, ddDifficultyScaling: true }, true, rngB);
+
+        expect(resultExplicitTrue.ddEvents).toEqual(resultDefault.ddEvents);
+
+        // And these adjustedP values are indeed the row-scaled ones (not
+        // equal to base precision — the bottom rows scale it down).
+        for (const ev of resultDefault.ddEvents!) {
+          const player = ev.player === 0 ? you : opp;
+          expect(ev.adjustedP).toBeLessThan(player.p);
+        }
+      });
+    });
+
     it('the recorded score-state reproduces the same equity-optimal wager equityWager would compute live', () => {
       const you = makePlayer(0.7, 0.85, 0.6, 0.5);
       const opp = makePlayer(0.6, 0.87, 0.5, 0.5);
