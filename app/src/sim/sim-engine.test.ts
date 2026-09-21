@@ -231,12 +231,17 @@ describe('sim-engine', () => {
       expect(yourEvents.length).toBeGreaterThan(0);
 
       for (const ev of yourEvents) {
+        // The engine records the board it handed to the lock-aware guard.
+        expect(ev.lockContext).toBeDefined();
+        expect(ev.lockContext!.round).toBe(ev.round);
+        expect(ev.lockContext!.remainingClueValues.length).toBe(ev.cluesRemainingAfter);
         const recomputed = equityWager(
           { knowledge: you.b * you.p, buzzerSpeed: you.buzzerSpeed },
           ev.scoresBefore!,
           ev.cluesRemainingAfter!,
           ev.adjustedP!,
           table,
+          ev.lockContext,
         );
         // The engine wagered exactly this (it dispatches to the same
         // equityWager with the same inputs before mutating scores).

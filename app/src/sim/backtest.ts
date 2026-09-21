@@ -505,7 +505,14 @@ export function backtestGame(record: GameRecord, opts: BacktestOptions): Backtes
   ): { wager: number; source: EquitySource } | null => {
     if (canUseTable(step.round)) {
       const cluesRemainingAfter = step.remainingValuesAfter.length;
-      const w = equityWager(equityYou, pos.scores, cluesRemainingAfter, pCorrect, opts.valueTable as ValueTable);
+      // The position carries the real remaining board, so the table's
+      // answer goes through equityWager's lock-aware guard (the 9501 case:
+      // a guaranteed leader the table wanted to bet $12,633 with).
+      const w = equityWager(equityYou, pos.scores, cluesRemainingAfter, pCorrect, opts.valueTable as ValueTable, {
+        remainingClueValues: pos.remainingClueValues,
+        remainingDDs: pos.remainingDDCount,
+        round: step.round,
+      });
       return { wager: w, source: 'table' };
     }
     if (equityFallback === 'skip') return { wager: NaN, source: 'skipped' };
