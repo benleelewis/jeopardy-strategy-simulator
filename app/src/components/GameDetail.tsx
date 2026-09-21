@@ -455,8 +455,10 @@ function DailyDoubles({
                 </span>
               );
             } else if (ev.scoresBefore !== undefined && ev.cluesRemainingAfter !== undefined && ev.adjustedP !== undefined) {
+              // ev.lockContext (remaining board + DDs) lets equityWager's
+              // lock guard cap the table wager on near-lock positions.
               optimalWager = equityWager(
-                ddDetail.you, ev.scoresBefore, ev.cluesRemainingAfter, ev.adjustedP, valueTable,
+                ddDetail.you, ev.scoresBefore, ev.cluesRemainingAfter, ev.adjustedP, valueTable, ev.lockContext,
               );
               equityCell = dollars(optimalWager);
               const diff = ev.wager - optimalWager;

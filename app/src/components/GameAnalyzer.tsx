@@ -367,9 +367,21 @@ export function GameAnalyzer({ onEstimate, sharedValueTable, backtestRunner = wo
     if (seat < 0) return null;
 
     const you: EquityWagerYou = { knowledge: estKnowledge, buzzerSpeed: estBuzzer };
+    // The game record (when the API response carries one) knows the exact
+    // board left after each DD, which lets equityWager's lock guard refuse a
+    // table wager that would give away a guaranteed lead. Match the DD to
+    // its record step by round + taker + scores-before; fall back to the
+    // unguarded lookup when there is no record.
+    const steps = jarchiveGame.record?.steps ?? [];
     return yourDailyDoubles.map(dd => {
       const scores = rotateToSeat(dd.allScoresBefore, seat);
-      const optimalWager = equityWager(you, scores, dd.cluesRemainingAfter, confidence, equityTable);
+      const step = steps.find(st =>
+        st.isDD && st.round === dd.round && st.ddPlayer === seat &&
+        st.before.length === 3 && st.before.every((v, i) => v === dd.allScoresBefore[i]));
+      const lock = step
+        ? { remainingClueValues: step.remainingValuesAfter, remainingDDs: step.remainingDDsAfter, round: dd.round }
+        : undefined;
+      const optimalWager = equityWager(you, scores, dd.cluesRemainingAfter, confidence, equityTable, lock);
       return { dd, optimalWager };
     });
   }, [jarchiveGame, jarchiveContestant, yourDailyDoubles, equityTable, estKnowledge, estBuzzer, confidence]);

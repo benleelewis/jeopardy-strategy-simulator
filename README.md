@@ -98,7 +98,7 @@ win rates of 36.4%, 43.2%, and 55.2% at three wager sizes, against the paper's
 36%, 45%, and 55%. The largest error is 1.8 percentage points. This runs as a
 test, so a change to the engine that breaks the agreement fails the build.
 
-There are 258 tests in total. They cover the boundary cases, e.g., a player who
+There are 276 tests in total. They cover the boundary cases, e.g., a player who
 answers everything correctly wins more than 90% of the time. They also cover
 monotonicity, which means that raising your knowledge or your buzzer speed never
 lowers your win rate. A set of regression locks records the exact scores of
@@ -122,6 +122,16 @@ for how much seeking is worth: with the flat model a strong player gains about
 point, because a hard Daily Double at a large wager is close to a coin flip.
 There is a checkbox for the flat model under the Explorer's controls, and the
 default is the row-scaled one.
+
+**Locks.** The equity table is coarse, and on a near-lock position it can
+recommend a large wager where the right answer is the minimum. On one real
+game (J-Archive 9501) the table said $12,633 from a $19,200 to $7,800 lead with
+seven clues left; a direct rollout of the exact position said the minimum
+wins 99.9% and $12,633 wins 94.8%. So before the table lookup the engine now
+works out the most an opponent could still reach (every remaining clue, every
+remaining Daily Double doubled, then Final Jeopardy doubled) and caps the
+wager at the largest amount that keeps a guaranteed lead. Positions with no
+such guarantee are unchanged.
 
 ## Running it locally
 
