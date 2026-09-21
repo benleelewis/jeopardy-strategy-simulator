@@ -273,6 +273,16 @@ export interface DDEvent {
    * event without re-deriving the difficulty scaling itself.
    */
   adjustedP?: number;
+  /**
+   * The board after this DD — face values of the clues still unrevealed in
+   * this round and the Daily Doubles still unfound — i.e. `equityWager`'s
+   * optional `lock` context (its lock-aware guard, value-function.ts).
+   * Recorded ONLY when the equity path actually ran (your player, 'equity'
+   * strategy, a value table present), so a caller recomputing that wager
+   * out-of-engine can pass exactly what the engine passed. Absent on every
+   * other DD event: nothing is allocated on the default (heuristic) path.
+   */
+  lockContext?: { remainingClueValues: number[]; remainingDDs: number; round: 'J' | 'DJ' };
 }
 
 // ─── Constants ───────────────────────────────────────────────────────
@@ -953,14 +963,34 @@ export function simulateRound(
       // valueTable both fall back to 'aggressive' — documented, never a
       // silent min-bet.
       let wager: number;
+      let lockContext: DDEvent['lockContext'];
       if (ddController === 0 && controllerStrategy === 'equity') {
         if (config.valueTable) {
+          // The board after this DD, for equityWager's lock-aware guard:
+          // legacy order plays the list front-to-back, so what's left is
+          // the tail; a tracked board knows exactly which squares are
+          // unplayed and how many DDs it still hides.
+          let remainingClueValues: number[];
+          let remainingDDs: number;
+          if (board !== null) {
+            remainingClueValues = [];
+            for (let k = 0; k < board.n; k++) {
+              if (board.played[k] === 0) remainingClueValues.push(board.values[k]);
+            }
+            remainingDDs = board.ddRemaining;
+          } else {
+            remainingClueValues = clues.slice(played + 1);
+            remainingDDs = 0;
+            for (const d of ddIndices!) if (d > played) remainingDDs++;
+          }
+          lockContext = { remainingClueValues, remainingDDs, round };
           wager = equityWager(
             { knowledge: player.b * player.p, buzzerSpeed: player.buzzerSpeed },
             scores,
             cluesRemainingAfter,
             adjustedP,
             config.valueTable,
+            lockContext,
           );
         } else {
           wager = ddWager('aggressive', scores[ddController], maxClueValue, config.ddWagerFraction);
@@ -997,6 +1027,7 @@ export function simulateRound(
         // — kept consistent for GameDetail's out-of-engine recomputation.
         cluesRemainingAfter,
         adjustedP,
+        ...(lockContext !== undefined ? { lockContext } : {}),
       });
     } else {
       // Regular clue
