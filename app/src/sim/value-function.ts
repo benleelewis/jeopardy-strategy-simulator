@@ -463,12 +463,183 @@ export function queryV(table: ValueTable, state: VQueryState): number {
   return Math.max(0, Math.min(1, value));
 }
 
+// ─── Lock analysis (deterministic guard in front of the table) ───────────
+
+/** Highest clue value per round — the floor under a Daily Double wager's
+ *  legal maximum (a player may bet up to the GREATER of their score and
+ *  this), so a broke opponent hitting a DD can still gain this much. */
+const ROUND_TOP_VALUE: Record<'J' | 'DJ', number> = { J: 1000, DJ: 2000 };
+
+/** Whole Double Jeopardy board ($36,000) and its DD count — what an
+ *  opponent could still sweep AFTER a Jeopardy-round Daily Double.
+ *  Computed on first use, not at module load: this module and sim-engine
+ *  import each other, so `DJ_VALUES` is not yet initialised when
+ *  sim-engine is the entry point. */
+let djBoardTotalCache = -1;
+function djBoardTotal(): number {
+  if (djBoardTotalCache < 0) {
+    djBoardTotalCache = buildFullBoard(DJ_VALUES).reduce((a, b) => a + b, 0);
+  }
+  return djBoardTotalCache;
+}
+const DJ_DD_COUNT = 2;
+
+/** Real-rules minimum Daily Double wager ($5) — the floor `equityWager`'s
+ *  bet grid starts at (NOT `ddWager`'s `minWager = maxClueValue`
+ *  heuristic-preset simplification; see `equityWager` doc). */
+export const EQUITY_MIN_WAGER = 5;
+
+export interface LockAnalysis {
+  /**
+   * Largest wager (rounded down to $100, never below $5) at which the
+   * wagering player still holds an FJ-proof lock after MISSING the Daily
+   * Double: `score − wager > maxOpponentReach`, where the opponent has
+   * swept the rest of the game AND doubled in Final Jeopardy. `null` when
+   * no legal wager keeps that lock (including "not a lock even at $5").
+   */
+  lockedAtWager: number | null;
+  /** Best opponent's best case after Final Jeopardy (see `maxOpponentReachPreFJ`, doubled). */
+  maxOpponentReach: number;
+  /** True when the FJ-proof lock survives a miss at the $5 minimum. */
+  isLockNow: boolean;
+  /**
+   * Best opponent's best case at the END OF THE ROUND(S), before Final
+   * Jeopardy: every remaining clue (both rounds if this is a Jeopardy-round
+   * DD), every remaining Daily Double as a true daily double.
+   */
+  maxOpponentReachPreFJ: number;
+  /**
+   * Largest wager (same rounding as `lockedAtWager`) at which the player
+   * is still GUARANTEED to lead going into Final Jeopardy after a miss:
+   * `score − wager > maxOpponentReachPreFJ`. Weaker than a lock (an
+   * opponent could still double past them in FJ) but the structural fact
+   * the V(S) table loses at 9501-type positions — see `equityWager`.
+   */
+  leadSafeAtWager: number | null;
+  /** True when the guaranteed pre-FJ lead survives a miss at the $5 minimum. */
+  isLeadSafeNow: boolean;
+}
+
+/**
+ * Conservative ceiling on what one opponent can still reach before Final
+ * Jeopardy: they take every remaining clue at face value (a DD clue's face
+ * value is counted too — a harmless over-estimate), then hit every
+ * remaining Daily Double as a true daily double (or for the round's top
+ * value if that is more, per the real max-wager rule). Clues before DDs is
+ * the maximising order (doubling a larger number). A Jeopardy-round DD
+ * also has the whole Double Jeopardy board and its two DDs still to come.
+ */
+function opponentReachPreFJ(
+  oppScore: number,
+  remainingClueValues: readonly number[],
+  remainingDDs: number,
+  round: 'J' | 'DJ',
+): number {
+  let reach = oppScore;
+  for (const v of remainingClueValues) reach += v;
+  for (let i = 0; i < remainingDDs; i++) reach = Math.max(2 * reach, reach + ROUND_TOP_VALUE[round]);
+  if (round === 'J') {
+    reach += djBoardTotal();
+    for (let i = 0; i < DJ_DD_COUNT; i++) reach = Math.max(2 * reach, reach + ROUND_TOP_VALUE.DJ);
+  }
+  return reach;
+}
+
+/** Largest legal wager `w` with `score − w > ceiling`, rounded down to a
+ *  $100 multiple but never below the $5 floor; `null` if even $5 fails. */
+function largestSafeWager(score: number, ceiling: number): number | null {
+  const maxSafe = score - ceiling - 1;
+  if (maxSafe < EQUITY_MIN_WAGER) return null;
+  return Math.max(EQUITY_MIN_WAGER, Math.floor(maxSafe / 100) * 100);
+}
+
+/**
+ * Pure, deterministic lock analysis for the player at `playerIdx` who is
+ * about to wager on a Daily Double. Everything is worst-case for the
+ * wagerer: they miss the DD, never score again (they can always decline
+ * to buzz, so `score − wager` is a floor they control), wager $0 in FJ;
+ * each opponent sweeps every remaining clue, hits every remaining DD as a
+ * true daily double, and doubles in Final Jeopardy (a player at ≤ $0
+ * cannot play FJ, so their reach is not doubled).
+ *
+ * `remainingClueValues` / `remainingDDs` are the clues and Daily Doubles
+ * still on the board AFTER this DD (the same quantities `SimState` carries).
+ */
+export function lockAnalysis(
+  scores: readonly number[],
+  playerIdx: number,
+  remainingClueValues: readonly number[],
+  remainingDDs: number,
+  round: 'J' | 'DJ',
+): LockAnalysis {
+  const score = scores[playerIdx];
+  let maxPreFJ = -Infinity;
+  for (let i = 0; i < scores.length; i++) {
+    if (i === playerIdx) continue;
+    const reach = opponentReachPreFJ(scores[i], remainingClueValues, remainingDDs, round);
+    if (reach > maxPreFJ) maxPreFJ = reach;
+  }
+  if (maxPreFJ === -Infinity) maxPreFJ = 0; // no opponents at all
+  const maxPostFJ = maxPreFJ > 0 ? 2 * maxPreFJ : maxPreFJ;
+
+  const lockedAtWager = largestSafeWager(score, maxPostFJ);
+  const leadSafeAtWager = largestSafeWager(score, maxPreFJ);
+  return {
+    lockedAtWager,
+    maxOpponentReach: maxPostFJ,
+    isLockNow: lockedAtWager !== null,
+    maxOpponentReachPreFJ: maxPreFJ,
+    leadSafeAtWager,
+    isLeadSafeNow: leadSafeAtWager !== null,
+  };
+}
+
 // ─── E-3: Equity DD wagering (YOUR player only) ──────────────────────────
 
 export interface EquityWagerYou {
   /** b×p composite, same semantics as `playerFrom2Axis`'s `knowledge` arg. */
   knowledge: number;
   buzzerSpeed: number;
+}
+
+/**
+ * What `equityWager` needs to run `lockAnalysis` in front of the table
+ * lookup: the board AFTER this Daily Double. Optional — callers that only
+ * have a score-state (the components' out-of-engine recomputations) get
+ * the unguarded table lookup, exactly as before.
+ */
+export interface EquityLockContext {
+  remainingClueValues: readonly number[];
+  remainingDDs: number;
+  round: 'J' | 'DJ';
+}
+
+/**
+ * Lock-aware guard applied to the table's recommendation. Returns the
+ * wager to use given the table's unguarded argmax.
+ *
+ * Why (J-Archive game 9501, Grace's DJ Daily Double): scores $19,200 vs
+ * $7,800 / $7,000, seven clues left worth $3,200 total, no DDs left. No
+ * opponent can pass $11,000 before FJ, so any wager ≤ $8,100 keeps Grace
+ * the guaranteed leader into FJ even if she misses; a direct paired
+ * rollout says the $5 minimum wins 99.9%. The table, which buckets states
+ * by nominal-pot share and score ratio against generic opponents and
+ * samples a random remaining board, said $12,633 — a wager that wins
+ * 94.8% because a miss drops her to $6,567, behind both opponents. The
+ * table cannot see that the position is (nearly) a lock; this guard can.
+ *
+ * Rule: take the tightest lock threshold that exists (FJ-proof lock first,
+ * else the guaranteed pre-FJ lead). If the table's choice is at or below
+ * it, trust the table; if the table wants to wager PAST it, its ranking is
+ * not tracking the lock structure at all, so fall back to the minimum —
+ * the one wager whose downside is provably nil. When neither threshold
+ * exists the table's choice is returned untouched, so nothing changes for
+ * non-lock positions (E-4 paper replication, production invariants).
+ */
+export function applyLockGuard(tableWager: number, lock: LockAnalysis): number {
+  const threshold = lock.lockedAtWager ?? lock.leadSafeAtWager;
+  if (threshold === null) return tableWager;
+  return tableWager <= threshold ? tableWager : EQUITY_MIN_WAGER;
 }
 
 /**
@@ -484,6 +655,13 @@ export interface EquityWagerYou {
  * `simulateRound` in sim-engine.ts; `ddWager`'s type signature statically
  * excludes `'equity'`, so this file — not `ddWager` — is the only legal
  * place `'equity'` wagers get computed).
+ *
+ * `lock` (optional, additive): the board after this DD. When given, the
+ * table's argmax passes through `lockAnalysis` + `applyLockGuard` so a
+ * position the table's coarse buckets misread as "worth wagering on" but
+ * which is structurally a lock (or a guaranteed pre-FJ lead) never gets a
+ * wager past the lock threshold. Omitted ⇒ byte-identical to the
+ * pre-guard lookup.
  */
 export function equityWager(
   you: EquityWagerYou,
@@ -491,8 +669,9 @@ export function equityWager(
   cluesRemainingAfter: number,
   pCorrect: number,
   table: ValueTable,
+  lock?: EquityLockContext,
 ): number {
-  const MIN_WAGER = 5;
+  const MIN_WAGER = EQUITY_MIN_WAGER;
   const MAX_EVALS = 40;
   const STEP = 500;
 
@@ -525,5 +704,14 @@ export function equityWager(
     }
   }
 
+  // Lock-aware guard (see `applyLockGuard` for the 9501 example). Only
+  // callers that know the board after this DD can get it; a plain
+  // score-state call is the unguarded lookup, unchanged.
+  if (lock !== undefined) {
+    return applyLockGuard(
+      bestWager,
+      lockAnalysis(scores, 0, lock.remainingClueValues, lock.remainingDDs, lock.round),
+    );
+  }
   return bestWager;
 }
