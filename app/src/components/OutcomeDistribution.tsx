@@ -301,8 +301,6 @@ function ScoreHistogram({ preFJ, postFJ, medianPreFJ, medianPostFJ }: {
     const H = CANVAS_H;
     canvas.width = W * dpr;
     canvas.height = H * dpr;
-    canvas.style.width = `${W}px`;
-    canvas.style.height = `${H}px`;
     ctx.scale(dpr, dpr);
 
     const bg = readVar(canvas, '--bg', '#0d1117');
@@ -413,8 +411,6 @@ function MarginHistogram({ margins }: { margins: number[] }) {
     const H = CANVAS_H;
     canvas.width = W * dpr;
     canvas.height = H * dpr;
-    canvas.style.width = `${W}px`;
-    canvas.style.height = `${H}px`;
     ctx.scale(dpr, dpr);
 
     const bg = readVar(canvas, '--bg', '#0d1117');
