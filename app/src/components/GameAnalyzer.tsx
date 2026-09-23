@@ -187,7 +187,8 @@ export function GameAnalyzer({ onEstimate, sharedValueTable, backtestRunner = wo
   useEffect(() => () => { backtestCancelRef.current?.(); }, []);
 
   const handleLoadJArchive = useCallback(async () => {
-    const trimmed = jarchiveGameId.trim();
+    // Accept a pasted j-archive.com link as well as the bare game_id.
+    const trimmed = jarchiveGameId.trim().match(/game_id=(\d+)/)?.[1] ?? jarchiveGameId.trim();
     if (trimmed === '') {
       setJarchiveError('Enter a J-Archive game ID first, e.g. 9501');
       return;
@@ -439,8 +440,12 @@ export function GameAnalyzer({ onEstimate, sharedValueTable, backtestRunner = wo
               {jarchiveStatus === 'loading' ? 'Loading…' : 'Load'}
             </button>
           </div>
-          {jarchiveError && (
+          {jarchiveError ? (
             <div style={hintStyle}>{jarchiveError}</div>
+          ) : !jarchiveGame && (
+            <div style={hintStyle}>
+              The number after game_id= in the j-archive.com link, not the show #. Pasting the link works too.
+            </div>
           )}
 
           {jarchiveGame && (
