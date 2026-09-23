@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // Regression: ISSUE-007 — two merges dropped closing braces in App.css, so
 // every later rule was parsed as nested inside .visually-hidden:focus-within
 // and silently stopped applying (unstyled Share button, broken mobile layout).
