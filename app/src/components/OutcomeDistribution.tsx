@@ -370,9 +370,9 @@ function ScoreHistogram({ preFJ, postFJ, medianPreFJ, medianPostFJ }: {
     ctx.font = '9px monospace';
     ctx.fillStyle = mutedColor;
     ctx.textAlign = 'left';
-    ctx.fillText(`$${Math.round(min).toLocaleString()}`, plotLeft, H - 6);
+    ctx.fillText(`${min < 0 ? '−' : ''}${plainDollars(min)}`, plotLeft, H - 6);
     ctx.textAlign = 'right';
-    ctx.fillText(`$${Math.round(max).toLocaleString()}`, plotRight, H - 6);
+    ctx.fillText(`${max < 0 ? '−' : ''}${plainDollars(max)}`, plotRight, H - 6);
   }, [preFJ, postFJ, medianPreFJ, medianPostFJ]);
 
   return (
