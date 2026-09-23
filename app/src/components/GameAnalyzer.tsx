@@ -241,6 +241,14 @@ export function GameAnalyzer({ onEstimate, sharedValueTable, backtestRunner = wo
     setCorrect(c.correct);
     setWrong(c.wrong);
     setCoryat(c.coryat);
+    // Seed the DD confidence from this contestant's accuracy in the game,
+    // the same precision the backtest draws its DD outcomes from, so the
+    // "Equity-optimal was $Y" lines and the backtest table agree. Clamped to
+    // the slider's 50–95% range; the slider can still override it.
+    const attempts = c.correct + c.wrong;
+    if (attempts > 0) {
+      setConfidence(Math.min(0.95, Math.max(0.5, Math.round((c.correct / attempts) * 100) / 100)));
+    }
   }, [jarchiveGame]);
 
   const yourDailyDoubles: JArchiveDDEvent[] = useMemo(() => {
@@ -470,6 +478,9 @@ export function GameAnalyzer({ onEstimate, sharedValueTable, backtestRunner = wo
             <div style={{ marginTop: 10 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-h)', marginBottom: 4 }}>
                 {jarchiveContestant}'s Daily Doubles
+                <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>
+                  {' '}at {Math.round(confidence * 100)}% confidence
+                </span>
               </div>
               {yourDailyDoubles.length === 0 ? (
                 <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
