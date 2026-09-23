@@ -150,6 +150,7 @@ function responseBody(section: string, id: string): string {
 function parseRoundClues(section: string, round: Round): Clue[] {
   const categories = parseCategories(section);
   const clues: Clue[] = [];
+  const printed: { row: number; value: number }[] = [];
 
   // Each clue's header carries id="clue_<R>_<col>_<row>_stuck", then the value
   // cell (plain or daily-double) and the order number.
@@ -192,6 +193,16 @@ function parseRoundClues(section: string, round: Round): Clue[] {
       right: right[0] ?? null,
       wrong,
     });
+    if (!isDD) printed.push({ row, value: money(valueText) });
+  }
+
+  // Games before the 2001-11-26 value doubling print $100–$500 / $200–$1,000.
+  // A Daily Double square shows only its wager, so infer the round's scale
+  // from the squares that do print a face value and apply it to every clue.
+  const halved = printed.filter(p => p.value === ROUND_VALUES[round][p.row - 1] / 2).length;
+  const full = printed.filter(p => p.value === ROUND_VALUES[round][p.row - 1]).length;
+  if (halved > full) {
+    for (const c of clues) c.boundValue /= 2;
   }
 
   return clues;
