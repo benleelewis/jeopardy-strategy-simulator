@@ -1,6 +1,6 @@
 # Jeopardy Strategy Simulator — Task Tracker
 
-*Updated 2026-07-04 — PLAN.md (approved via /autoplan) implemented; see Phase D below*
+*Updated 2026-09-23 — /qa pass on the live site: 7 fixes, report in .gstack/qa-reports/*
 
 ## Phase D: Equity Wagering + Calibration + Honest Axes (PLAN.md — IMPLEMENTED 2026-07-04)
 - [x] P-0: baseline commit (app/ into git for the first time), dataset gitignored
@@ -89,7 +89,7 @@
 - [x] Progressive rendering: 1 sim/game fast → 5 sims/game refined (auto-triggers refined pass after fast completes)
 - [x] "Your Number" headline stat + histogram + streak + breakdown (YourNumber.tsx)
 - [x] Marginal Returns panel — bottleneck dimension identification (MarginalReturns.tsx)
-- [ ] Verify all new features end-to-end in browser (visual check)
+- [x] Verify all new features end-to-end in browser (visual check) — /qa 2026-09-23, health 87 → 98
 - [x] Performance tuning: rAF drag throttle, 300ms debounce on all-games sim, persistent worker, lazy tab sim
 
 ## Phase C: Your Game + Marginal Returns (COMPLETE)
@@ -137,9 +137,14 @@
 
 ## Phase 3: Real Data & Community (Future)
 - [ ] Full J-Archive dataset integration (curated, static)
-- [x] Backtest any real game with different strategies — "Backtest this game" in Your Game after a J-Archive load, plus `npx tsx scripts/backtest.ts --game <id>`; run it on #8276 once that game is cached, 2026-09-20
+- [x] Backtest any real game with different strategies — "Backtest this game" in Your Game after a J-Archive load, plus `npx tsx scripts/backtest.ts --game <id>`; 2026-09-20. Show #8276 is J-Archive game_id **6862**: equity wagering at Ben's two DJ DDs lifts the win chance from 46% to 73% (± 1), 2026-09-23
 - [ ] Community features (sharing, leaderboards)
 - [ ] Advanced 3-factor axis model toggle
+
+## QA follow-ups (2026-09-23)
+- [ ] All Games grid is 1,650px wide in a 1,232px container at 1280px; a quarter of each season needs horizontal scroll with no visible cue
+- [ ] Famous-player labels overlap in the Explorer (Schneider/Rutter, Holzhauer/Watson)
+- [ ] Explain why the same position reads 32% on All Games and ~21% in the Explorer (real opponents vs. the opponent slider)
 
 ## TODOS (from CEO review)
 - [x] **P2**: DD impact difference map overlay — 2026-09-11
