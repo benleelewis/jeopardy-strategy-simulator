@@ -407,13 +407,23 @@ export function HeatMap({
         .clamp(true);
     }
 
-    // Draw cells
-    g.selectAll('rect.cell')
+    // Draw cells centered on their grid points (the same convention the
+    // contours below use), clipped to the plot area so the edge cells
+    // don't spill a half cell over the title or past the 100% ticks.
+    g.append('clipPath')
+      .attr('id', 'heatmap-plot-clip')
+      .append('rect')
+      .attr('width', INNER_W)
+      .attr('height', INNER_H);
+
+    g.append('g')
+      .attr('clip-path', 'url(#heatmap-plot-clip)')
+      .selectAll('rect.cell')
       .data(grid)
       .join('rect')
       .attr('class', 'cell')
-      .attr('x', d => xScale(d.x))
-      .attr('y', d => yScale(d.y) - cellH)
+      .attr('x', d => xScale(d.x) - cellW / 2)
+      .attr('y', d => yScale(d.y) - cellH / 2)
       .attr('width', cellW + 1)
       .attr('height', cellH + 1)
       .attr('fill', (_, i) => (diffReady && smoothedDiffValues && diffColorScale)
