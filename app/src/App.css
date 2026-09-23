@@ -441,6 +441,7 @@
   overflow: visible;
   clip: auto;
   white-space: normal;
+}
 
 /* Your Number share card button (P3 — Your Number share card) */
 .share-button {
@@ -538,6 +539,9 @@
 
   .side-section:last-child {
     border-bottom: none;
+  }
+}
+
 /* Phase 1D: "Watch this game" replay (GameReplay.tsx) */
 .replay-bars {
   display: flex;
