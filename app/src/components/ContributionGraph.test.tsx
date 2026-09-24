@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { ContributionGraph, type GameData } from './ContributionGraph';
+import { ContributionGraph, gridPitch, type GameData } from './ContributionGraph';
 
 // jsdom has no real canvas 2D context — stub just the methods/properties
 // the component calls during its draw effects (P3 ContributionGraph a11y
@@ -195,5 +195,34 @@ describe('ContributionGraph — "Gain from optimal play" colour mode (P2 optimal
     expect(label).toContain('Overall win rate 50%');
     expect(label).not.toContain('gain');
     expect(within(screen.getByRole('table')).getByText('Win rate by season')).toBeInTheDocument();
+  });
+});
+
+describe('gridPitch — all-seasons column sizing (overflow fix)', () => {
+  // CELL_STEP (6px cell + 1px gap = 7) is the ceiling — today's fixed pitch.
+  // MIN_PITCH (4) is the floor — below it squares stop being clickable/visible.
+
+  it('fits in the container: uses the exact pitch that packs the columns, unclamped', () => {
+    // 300px available / 50 columns = 6px exactly, which sits between the
+    // floor (4) and ceiling (7), so gridPitch returns it unchanged.
+    expect(gridPitch(300, 50)).toBe(6);
+  });
+
+  it('clamps to the max pitch when the container has far more room than needed', () => {
+    // 2000px available / 10 columns = 200px ideal, way past the 7px ceiling.
+    expect(gridPitch(2000, 10)).toBe(7);
+  });
+
+  it('clamps to MIN_PITCH when even the smallest pitch would overflow', () => {
+    // Regression case: a ~230-game season (S1-S41 max) in a 343px phone
+    // viewport. 303px available / 230 columns = 1px ideal, below the 4px
+    // floor, so the grid holds at 4px and stays wider than the container —
+    // that's what the scroll-hint overlay is for.
+    expect(gridPitch(343 - 40, 230)).toBe(4);
+  });
+
+  it('matches the reported desktop fix: a ~230-game season now fits a 1232px container', () => {
+    // 1192px available / 230 columns = 5.18 -> floor 5, within [4, 7].
+    expect(gridPitch(1232 - 40, 230)).toBe(5);
   });
 });
