@@ -142,9 +142,10 @@
 - [ ] Advanced 3-factor axis model toggle
 
 ## QA follow-ups (2026-09-23)
-- [ ] All Games grid is 1,650px wide in a 1,232px container at 1280px; a quarter of each season needs horizontal scroll with no visible cue
-- [ ] Famous-player labels overlap in the Explorer (Schneider/Rutter, Holzhauer/Watson)
-- [ ] Explain why the same position reads 32% on All Games and ~21% in the Explorer (real opponents vs. the opponent slider)
+- [x] All Games grid fits the page width (pitch 7px → 5px at 1280px, 4px floor); below the floor it scrolls with a fade and a "Scroll for more →" hint, 2026-09-24
+- [x] Famous-player labels place themselves around each other and the YOU marker; Watson no longer reads "(IBM)", 2026-09-24
+- [x] Captions say who each headline number is measured against ("vs. two Average opponents" / "against each game's real opponents"), 2026-09-24
+- [ ] Phase 1G signal: the model's "Average" opponent is tougher than the typical real opponent (same position: 21% vs. model, 32% vs. real games). Recalibrate the Average profile against real buzz-in data
 
 ## TODOS (from CEO review)
 - [x] **P2**: DD impact difference map overlay — 2026-09-11
