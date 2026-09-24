@@ -121,6 +121,61 @@ export function interpolateOpponent(strength: number): { b: number; p: number; f
   };
 }
 
+// Plain-language names for the ANCHORS above — deliberately separate from
+// OPPONENT_PROFILES[...].name (e.g. 'Champion (TOC)'), which carries a
+// parenthetical aside that reads fine in a legend but not in a one-line
+// caption meant for someone who's never heard of the TOC.
+const ANCHOR_LABELS: [number, string][] = [
+  [0.0, 'Average'],
+  [0.5, 'Champion'],
+  [1.0, 'Grand Champion'],
+];
+
+/** How close (in opponentStrength units) a pinned value has to be to an
+ *  anchor to be described as "that" anchor rather than "between" two. */
+const ANCHOR_TOLERANCE = 0.05;
+
+/**
+ * Plain-words caption for who the Win Rate figure is measured against.
+ *
+ * - If opponentStrength is itself one of the two active heat-map axes, its
+ *   value varies across the map — there's no single opponent to name, so
+ *   the caption points at the axis instead.
+ * - Otherwise opponentStrength is a pinned scalar: name the nearest
+ *   Tesauro anchor profile (Average / Champion / Grand Champion) when
+ *   within ANCHOR_TOLERANCE of it, else describe it as between two
+ *   anchors (e.g. "between Average and Champion").
+ */
+export function opponentCaption(
+  xAxis: DimensionName,
+  yAxis: DimensionName,
+  opponentStrength: number,
+): string {
+  if (xAxis === 'opponentStrength' || yAxis === 'opponentStrength') {
+    return 'vs. opponents set by the Opponent Strength axis';
+  }
+
+  const s = clamp(opponentStrength, 0, 1);
+
+  for (const [t, name] of ANCHOR_LABELS) {
+    if (Math.abs(s - t) <= ANCHOR_TOLERANCE) {
+      return `vs. two ${name} opponents`;
+    }
+  }
+
+  for (let i = 0; i < ANCHOR_LABELS.length - 1; i++) {
+    const [loT, loName] = ANCHOR_LABELS[i];
+    const [hiT, hiName] = ANCHOR_LABELS[i + 1];
+    if (s > loT && s < hiT) {
+      return `vs. two opponents between ${loName} and ${hiName}`;
+    }
+  }
+
+  // Unreachable given s is clamped to [0,1] and the anchors span [0,1],
+  // but keeps the function total rather than possibly-undefined.
+  return 'vs. two opponents';
+}
+
 // ─── Candidate A calibration: buzz-race win % ↔ buzzerSpeed ───────────
 //
 // Candidate A's Y-axis ("buzz-race win % vs the field") has no closed-form
