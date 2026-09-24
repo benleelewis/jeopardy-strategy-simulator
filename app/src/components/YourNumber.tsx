@@ -429,6 +429,13 @@ export function YourNumber({ winRates, isSimulating }: Props) {
           win rate across {stats.total.toLocaleString()} games
           {isSimulating && <span style={{ color: '#26a641' }}> (refining...)</span>}
         </div>
+        <div style={{
+          fontSize: 12,
+          color: 'var(--text-muted)',
+          marginTop: 2,
+        }}>
+          against each game's real opponents
+        </div>
       </div>
 
       {/* Quick stats row */}

@@ -1039,6 +1039,7 @@ export default function App() {
                   winRate={winRate}
                   xAxis={xAxis}
                   yAxis={yAxis}
+                  pinnedValues={pinnedValues}
                 />
                 {/* Phase 1E "How your games end": score distribution + win
                     margin histogram + variance visualization, directly

@@ -1,10 +1,14 @@
-import { DIMENSIONS, fractionToValue, type DimensionName } from '../sim/dimensions';
+import { DIMENSIONS, fractionToValue, opponentCaption, type DimensionName } from '../sim/dimensions';
 
 interface Props {
   position: { x: number; y: number };
   winRate: number | null;
   xAxis: DimensionName;
   yAxis: DimensionName;
+  /** Pinned (non-axis) dimension values, keyed by dimension name — real
+   *  units, same shape App.tsx keeps in state. Used only to resolve
+   *  opponentStrength for the Win Rate caption when it isn't an axis. */
+  pinnedValues?: Record<string, number>;
 }
 
 const sectionStyle: React.CSSProperties = {
@@ -12,12 +16,18 @@ const sectionStyle: React.CSSProperties = {
   borderBottom: '1px solid var(--border)',
 };
 
-export function StatsPanel({ position, winRate, xAxis, yAxis }: Props) {
+export function StatsPanel({ position, winRate, xAxis, yAxis, pinnedValues = {} }: Props) {
   // Win rate is always a percentage regardless of which axes are active.
   const pct = (v: number) => `${Math.round(v * 100)}%`;
 
   const xDim = DIMENSIONS[xAxis];
   const yDim = DIMENSIONS[yAxis];
+
+  // Who the Win Rate figure is measured against — the nearest Tesauro
+  // anchor profile when opponentStrength is pinned, or a pointer at the
+  // axis when opponentStrength is itself being swept.
+  const opponentStrengthValue = pinnedValues.opponentStrength ?? DIMENSIONS.opponentStrength.defaultValue;
+  const winRateCaption = opponentCaption(xAxis, yAxis, opponentStrengthValue);
 
   // Position values speak each dimension's own units via format() —
   // P-1's load-bearing fix: a dollars axis (expectedCoryat) must never
@@ -78,6 +88,9 @@ export function StatsPanel({ position, winRate, xAxis, yAxis }: Props) {
               : '#dc2626',
           }}>
             {winRate === null ? '...' : pct(winRate)}
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: 4 }}>
+            {winRateCaption}
           </div>
         </div>
 
