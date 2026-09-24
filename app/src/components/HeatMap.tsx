@@ -11,6 +11,15 @@ import {
   type DimensionName,
 } from '../sim/dimensions';
 import { gaussianBlur2D } from '../sim/math-utils';
+import {
+  playerLabelText,
+  placeLabels,
+  estimateTextWidth,
+  textBoundingBox,
+  type Box,
+  type LabelPoint,
+  type TextMeasurer,
+} from './HeatMapLabels';
 
 interface Props {
   position: { x: number; y: number };
@@ -65,6 +74,37 @@ const yScale = d3.scaleLinear().domain([0, 1]).range([INNER_H, 0]);
 const colorScale = d3.scaleSequential(d3.interpolateRdYlGn).domain([0, 1]);
 
 const ALL_DIMENSIONS = Object.keys(DIMENSIONS) as DimensionName[];
+
+/** Builds a TextMeasurer backed by a real (detached from layout, opacity-0)
+ *  `<text>` element's getComputedTextLength() — accurate glyph widths for
+ *  the greedy label placement below. jsdom (used by *.test.tsx component
+ *  tests) doesn't implement SVG text layout and throws/returns 0 from
+ *  getComputedTextLength, so this always falls back to the character-count
+ *  estimate (`estimateTextWidth`, from HeatMapLabels.ts — the same pure
+ *  fallback placeLabels' own default measurer uses) when that happens,
+ *  which is why placeLabels itself never depends on the DOM at all. */
+function makeSvgTextMeasurer(svgEl: SVGSVGElement): { measure: TextMeasurer; cleanup: () => void } {
+  const probe = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  probe.setAttribute('opacity', '0');
+  probe.setAttribute('aria-hidden', 'true');
+  svgEl.appendChild(probe);
+
+  const measure: TextMeasurer = (text, fontSize) => {
+    try {
+      probe.setAttribute('font-size', `${fontSize}px`);
+      probe.textContent = text;
+      if (typeof probe.getComputedTextLength === 'function') {
+        const width = probe.getComputedTextLength();
+        if (Number.isFinite(width) && width > 0) return width;
+      }
+    } catch {
+      // getComputedTextLength unimplemented in this runtime — fall through.
+    }
+    return estimateTextWidth(text, fontSize);
+  };
+
+  return { measure, cleanup: () => probe.remove() };
+}
 
 export function HeatMap({
   position, onPositionChange,
@@ -348,8 +388,12 @@ export function HeatMap({
   // ── Effect: Render grid + static elements ──
   useEffect(() => {
     if (!svgRef.current || grid.length === 0) return;
+    // Narrowed local (not svgRef.current directly) so it stays typed as
+    // non-null everywhere below, including inside makeSvgTextMeasurer's
+    // call further down.
+    const svgEl = svgRef.current;
 
-    const svg = d3.select(svgRef.current);
+    const svg = d3.select(svgEl);
     // Only clear the main group, not axis labels (they're React-managed)
     svg.selectAll('.main-group').remove();
 
@@ -510,8 +554,18 @@ export function HeatMap({
     // with no known position on either axis is hidden, never guessed.
     // Values are in real dimension units (e.g. dollars for expectedCoryat),
     // so normalize through valueToFraction before hitting the [0,1] scales.
+    //
+    // Labels are placed in a separate pass (below, after every dot/ring is
+    // drawn): collect each visible player's dot position + label text here
+    // first, so placeLabels (HeatMapLabels.ts) can see every candidate
+    // label — including the YOU marker's, as a fixed obstacle — at once
+    // and greedily route each one around collisions, instead of each
+    // label only knowing about the dot it's attached to.
     const xDimCfg = DIMENSIONS[xAxis];
     const yDimCfg = DIMENSIONS[yAxis];
+    const labelPoints: LabelPoint[] = [];
+    const estimatedById = new Map<string, boolean>();
+    const labelTextById = new Map<string, string>();
     for (const player of FAMOUS_PLAYERS) {
       const xPos = getFamousPlayerPosition(player, xAxis);
       const yPos = getFamousPlayerPosition(player, yAxis);
@@ -542,15 +596,10 @@ export function HeatMap({
         .attr('stroke-width', 1.5)
         .attr('opacity', isEstimated ? 0.7 : 0.9);
 
-      g.append('text')
-        .attr('x', px + 8)
-        .attr('y', py + 4)
-        .attr('fill', '#fff')
-        .attr('font-size', '10px')
-        .attr('font-weight', '500')
-        .attr('opacity', isEstimated ? 0.6 : 1)
-        .style('text-shadow', '0 1px 3px rgba(0,0,0,0.8)')
-        .text(player.name.split(' ').pop()!);
+      const labelText = playerLabelText(player.name);
+      labelPoints.push({ id: player.name, x: px, y: py, text: labelText });
+      estimatedById.set(player.name, !!isEstimated);
+      labelTextById.set(player.name, labelText);
     }
 
     // YOU marker
@@ -565,8 +614,47 @@ export function HeatMap({
     // dependency array doesn't need `position` — same ref pattern the drag
     // handlers below already use, since adding it here would force a full
     // grid/contour rebuild on every drag frame (the exact cost the separate
-    // "Update marker position" effect exists to avoid).
+    // "Update marker position" effect exists to avoid). This also means
+    // famous-player labels only route around the YOU marker's position AT
+    // BUILD TIME, not on every drag frame — matching the same "rebuild is
+    // expensive, dragging must stay cheap" tradeoff the marker position
+    // itself already makes.
     const initialPos = posRef.current;
+    const youCx = xScale(initialPos.x);
+    const youCy = yScale(initialPos.y);
+
+    const { measure: measureText, cleanup: cleanupMeasurer } = makeSvgTextMeasurer(svgEl);
+    const youLabelWidth = measureText('YOU', 12);
+    const youObstacles: Box[] = [
+      // Outer YOU ring (r=12)
+      { x: youCx - 12, y: youCy - 12, width: 24, height: 24 },
+      // "YOU" label itself, drawn at y=-18 relative to the marker, centered
+      textBoundingBox(youCx, youCy - 18, 'middle', youLabelWidth, 12),
+    ];
+
+    const placements = placeLabels(
+      labelPoints,
+      { width: INNER_W, height: INNER_H },
+      youObstacles,
+      10,
+      measureText,
+    );
+    cleanupMeasurer();
+
+    for (const placement of placements) {
+      const isEstimated = estimatedById.get(placement.id) ?? false;
+      g.append('text')
+        .attr('x', placement.x)
+        .attr('y', placement.y)
+        .attr('text-anchor', placement.anchor)
+        .attr('fill', '#fff')
+        .attr('font-size', '10px')
+        .attr('font-weight', '500')
+        .attr('opacity', isEstimated ? 0.6 : 1)
+        .style('text-shadow', '0 1px 3px rgba(0,0,0,0.8)')
+        .text(labelTextById.get(placement.id) ?? '');
+    }
+
     const youGroup = g.append('g')
       .attr('class', 'you-marker')
       .attr('transform', `translate(${xScale(initialPos.x)},${yScale(initialPos.y)})`)
