@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
+import { useRef, useEffect, useLayoutEffect, useCallback, useState, useMemo } from 'react';
 import { GAIN_NEUTRAL, GAIN_STRONG, formatGain, type ColorMode, type GainData } from './gain';
 
 export interface GameData {
@@ -25,7 +25,10 @@ interface Props {
 
 const CELL_SIZE = 6;
 const CELL_GAP = 1;
-const CELL_STEP = CELL_SIZE + CELL_GAP;
+const CELL_STEP = CELL_SIZE + CELL_GAP; // also the max column pitch — see gridPitch()
+// Smallest a column can shrink to before squares stop being clickable/visible.
+// Below this the grid keeps horizontal scroll instead of squeezing further.
+const MIN_PITCH = 4;
 const ROW_GAP = 6; // extra vertical gap between season rows for click targets
 const ROW_STEP = CELL_SIZE + ROW_GAP;
 const LABEL_WIDTH = 40;
@@ -74,6 +77,20 @@ function buildCalendarGrid(games: GameData[], indices: number[]): { grid: Map<st
   return { grid, maxWeek };
 }
 
+/**
+ * Column pitch (square + gap, px) for the all-seasons grid, chosen so every
+ * column plus the season-label gutter fits inside the container's available
+ * width. Never exceeds CELL_STEP (today's fixed pitch, the ceiling) and
+ * never drops below MIN_PITCH (the floor, past which cells stop being
+ * clickable/visible) — below the floor the grid keeps horizontal scroll
+ * instead of squeezing further.
+ */
+export function gridPitch(availableWidth: number, maxColumns: number): number {
+  if (maxColumns <= 0) return CELL_STEP;
+  const ideal = Math.floor(availableWidth / maxColumns);
+  return Math.max(MIN_PITCH, Math.min(CELL_STEP, ideal));
+}
+
 /** Fisher-Yates shuffle for reveal order */
 function shuffleIndices(n: number): number[] {
   const order = Array.from({ length: n }, (_, i) => i);
@@ -106,6 +123,11 @@ export function ContributionGraph({
   const [hoveredGame, setHoveredGame] = useState<number | null>(null);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; text: string } | null>(null);
   const [zoomedSeason, setZoomedSeason] = useState<number | null>(null);
+  // 0 until the container is measured (jsdom's clientWidth is always 0, so
+  // tests fall back to the max pitch below — same output as before this change).
+  const [containerWidth, setContainerWidth] = useState(0);
+  // True when the grid is wider than the container and not scrolled to the end.
+  const [scrollHint, setScrollHint] = useState(false);
 
   // Derived from `games`. useMemo rather than refs written in an effect, so the
   // first paint sees real values instead of the empty initial ref.
@@ -133,6 +155,42 @@ export function ContributionGraph({
     }
     return m;
   }, [seasonMap]);
+
+  // All-seasons column pitch, shrunk (down to MIN_PITCH) so the widest season
+  // plus the label gutter fits the container without horizontal scroll —
+  // falls back to the max (current, unshrunk) pitch until measured.
+  const pitch = useMemo(
+    () => (containerWidth > 0 ? gridPitch(containerWidth - LABEL_WIDTH, maxCols) : CELL_STEP),
+    [containerWidth, maxCols]
+  );
+  const cellSize = pitch - CELL_GAP;
+
+  // Recompute scroll-hint visibility: shown only while the grid overflows
+  // the container and there's still unscrolled content to the right.
+  const updateScrollHint = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const overflow = el.scrollWidth - el.clientWidth;
+    setScrollHint(overflow > 1 && el.scrollLeft < overflow - 1);
+  }, []);
+
+  // Measure the container on mount and whenever it resizes (e.g. sidebar
+  // toggle, window resize, orientation change). useLayoutEffect so the first
+  // paint already uses the real width instead of flashing full-size squares.
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    setContainerWidth(el.clientWidth);
+    updateScrollHint();
+    // jsdom (tests) has no ResizeObserver — skip live tracking there.
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(() => {
+      setContainerWidth(el.clientWidth);
+      updateScrollHint();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [updateScrollHint]);
 
   // --- Accessibility: text alternatives for the canvas (additive, no draw changes) ---
 
@@ -291,7 +349,7 @@ export function ContributionGraph({
 
     const rows = seasonOrder.length;
     const cols = maxCols;
-    const width = LABEL_WIDTH + cols * CELL_STEP;
+    const width = LABEL_WIDTH + cols * pitch;
     const height = TOP_PAD + rows * ROW_STEP;
 
     canvas.width = width * (window.devicePixelRatio || 1);
@@ -318,17 +376,19 @@ export function ContributionGraph({
 
       // Season label (clickable area)
       ctx.fillStyle = colors.label;
-      ctx.fillText(`S${season}`, LABEL_WIDTH - 4, y + CELL_SIZE / 2);
+      ctx.fillText(`S${season}`, LABEL_WIDTH - 4, y + cellSize / 2);
 
       // Cells
       for (let c = 0; c < indices.length; c++) {
         const gi = indices[c];
-        const x = LABEL_WIDTH + c * CELL_STEP;
+        const x = LABEL_WIDTH + c * pitch;
         ctx.fillStyle = getCellColor(gi, colors);
-        ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+        ctx.fillRect(x, y, cellSize, cellSize);
       }
     }
-  }, [games, values, hoveredGame, zoomedSeason, getColors, getCellColor, seasonOrder, seasonMap, maxCols]);
+
+    updateScrollHint(); // canvas just resized — the container's overflow may have changed
+  }, [games, values, hoveredGame, zoomedSeason, getColors, getCellColor, seasonOrder, seasonMap, maxCols, pitch, cellSize, updateScrollHint]);
 
   // Draw canvas — zoomed season view
   useEffect(() => {
@@ -389,7 +449,9 @@ export function ContributionGraph({
         ctx.fillRect(x, y, ZOOM_CELL_SIZE, ZOOM_CELL_SIZE);
       }
     }
-  }, [zoomedSeason, zoomGrid, games, values, hoveredGame, getColors, getCellColor]);
+
+    updateScrollHint(); // canvas just resized — the container's overflow may have changed
+  }, [zoomedSeason, zoomGrid, games, values, hoveredGame, getColors, getCellColor, updateScrollHint]);
 
   // Hit test — all-seasons or zoomed
   const hitTest = useCallback((clientX: number, clientY: number): { gi: number | null; seasonClick: number | null } => {
@@ -409,7 +471,7 @@ export function ContributionGraph({
     }
 
     // All-seasons view
-    const col = Math.floor((x - LABEL_WIDTH) / CELL_STEP);
+    const col = Math.floor((x - LABEL_WIDTH) / pitch);
     const row = Math.floor((y - TOP_PAD) / ROW_STEP);
 
     if (row < 0 || row >= seasonOrder.length) return { gi: null, seasonClick: null };
@@ -424,7 +486,7 @@ export function ContributionGraph({
     const indices = seasonMap.get(season);
     if (!indices || col >= indices.length) return { gi: null, seasonClick: null };
     return { gi: indices[col], seasonClick: null };
-  }, [zoomedSeason, zoomGrid, seasonOrder, seasonMap]);
+  }, [zoomedSeason, zoomGrid, seasonOrder, seasonMap, pitch]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     const { gi } = hitTest(e.clientX, e.clientY);
@@ -488,20 +550,48 @@ export function ContributionGraph({
           </span>
         </div>
       )}
-      <div
-        ref={containerRef}
-        style={{ overflowX: 'auto', padding: '8px 0' }}
-        onMouseMove={handleMouseMove}
-        onMouseLeave={handleMouseLeave}
-        onClick={handleClick}
-      >
-        <canvas
-          ref={canvasRef}
-          role="img"
-          aria-label={ariaLabel}
-          style={{ cursor: 'pointer', display: 'block' }}
-        />
+      {/* Wraps the scroll container so the fade overlay can be positioned
+          against it without affecting the container's own overflow box. */}
+      <div style={{ position: 'relative' }}>
+        <div
+          ref={containerRef}
+          style={{ overflowX: 'auto', padding: '8px 0' }}
+          onMouseMove={handleMouseMove}
+          onMouseLeave={handleMouseLeave}
+          onClick={handleClick}
+          onScroll={updateScrollHint}
+        >
+          <canvas
+            ref={canvasRef}
+            role="img"
+            aria-label={ariaLabel}
+            style={{ cursor: 'pointer', display: 'block' }}
+          />
+        </div>
+        {/* Overflow cue for when even MIN_PITCH doesn't fit (e.g. phones) —
+            a right-edge fade using the same --bg the canvas paints itself
+            with, so it blends in both themes. Purely visual: never blocks
+            the scroll or click handlers above it. */}
+        {scrollHint && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              bottom: 0,
+              width: 28,
+              background: 'linear-gradient(to right, transparent, var(--bg))',
+              pointerEvents: 'none',
+            }}
+          />
+        )}
       </div>
+      {scrollHint && (
+        <div style={{ color: 'var(--text-muted)', fontSize: 11, textAlign: 'right', marginTop: -4 }}>
+          Scroll for more →
+        </div>
+      )}
       {/* Screen-reader / keyboard alternatives — additive only, never
           affects the canvas drawing or mouse interaction above. */}
       <div className="visually-hidden">
